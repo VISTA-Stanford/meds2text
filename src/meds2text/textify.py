@@ -28,11 +28,12 @@ OMOP data sourced from Stanford's STARR EHR data.
 Example Usage:
 
 # MedAlign 
-python src/vista/meds_to_text.py \
---path_to_meds data/redivis/meds_reader_omop_medalign \
---path_to_ontology notebooks/omop_ontology_v3 \
---path_to_metadata notebooks/metadata/ \
---path_to_output notebooks/medalign_lumia_xml/ \
+python src/meds2text/textify.py \
+--path_to_meds /Users/jfries/Desktop/foobar/meds_reader_omop_medalign/ \
+--path_to_ontology data/athena_omop_ontologies/ \
+--path_to_metadata data/omop_metadata/ \
+--path_to_output data/medalign_lumia_xml/ \
+--exclude_props clarity_table \
 --format lumia_xml \
 --include_contexts person providers care_sites \
 --apply_transforms \
@@ -77,7 +78,7 @@ import multiprocessing
 import os
 import re
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, List
 import xml.etree.ElementTree as ET
 
 from dateutil.relativedelta import relativedelta
@@ -87,7 +88,7 @@ import pandas as pd
 
 import meds_reader
 from meds_reader.transform import MutableEvent, MutableSubject
-from meds2text.ontology.athena import OntologyDescriptionLookupTable
+from meds2text.ontology import OntologyDescriptionLookupTable
 from meds2text.transforms import *
 
 
@@ -357,16 +358,29 @@ def apply_transforms(subject, *, transforms):
 #
 
 
+def read_metadata_file(path_to_metadata: str, base_name: str, **kwargs) -> pd.DataFrame:
+    """
+    Attempts to read a CSV file using either the .csv or .csv.tz extension.
+    Raises a FileNotFoundError if neither file is found.
+    """
+    for ext in [".csv", ".csv.gz"]:
+        file_path = os.path.join(path_to_metadata, f"{base_name}{ext}")
+        if os.path.exists(file_path):
+            return pd.read_csv(file_path, **kwargs)
+    raise FileNotFoundError(
+        f"Could not find file for {base_name} with extensions .csv or .csv.gz in {path_to_metadata}"
+    )
+
+
 def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     """
-    This messy function loads several OMOP tables for materializing metadata
-    for the MEDS text linearization. Assumes the folllowing tables are present:
+    This function loads several OMOP tables for materializing metadata
+    for the MEDS text linearization. Assumes the following tables are present:
 
-    metadata.providers.csv
-    metadata.payer_plan.csv
-    metadata.care_sites.csv
+      - metadata.providers.csv or metadata.providers.csv.tz
+      - metadata.payer_plan.csv or metadata.payer_plan.csv.tz
+      - metadata.care_sites.csv or metadata.care_sites.csv.tz
 
-    TODO - Refactor this function to be more modular and readable.
     """
 
     def init_all_providers(metadata):
@@ -389,7 +403,7 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
                 int(provider["year_of_birth"]) if provider["year_of_birth"] else None
             )
             care_site_id = (
-                None if not provider["care_site_id"] else provider["care_site_id"]
+                provider["care_site_id"] if provider["care_site_id"] else None
             )
             props["care_site_id"] = care_site_id
 
@@ -410,21 +424,24 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
         return metadata
 
     # providers
-    provider_map = pd.read_csv(f"{path_to_metadata}/metadata.providers.csv", dtype=str)
-    provider_map = provider_map.fillna("")
-    provider_map["gender_concept_id"] = provider_map["gender_concept_id"].replace(
+    provider_map_df = read_metadata_file(
+        path_to_metadata, "metadata.providers", dtype=str
+    )
+    provider_map_df = provider_map_df.fillna("")
+    provider_map_df["gender_concept_id"] = provider_map_df["gender_concept_id"].replace(
         {"8532": "FEMALE", "8507": "MALE", "0": ""}
     )
     provider_map = {
-        row.provider_id: dict(row._asdict()) for row in provider_map.itertuples()
+        row.provider_id: row._asdict() for row in provider_map_df.itertuples()
     }
 
     # payer plans
-    payer_plan_df = pd.read_csv(
-        f"{path_to_metadata}/metadata.payer_plan.csv",
+    payer_plan_df = read_metadata_file(
+        path_to_metadata,
+        "metadata.payer_plan",
         parse_dates=["payer_plan_period_start_DATE", "payer_plan_period_end_DATE"],
     )
-    # subset to only the relevant columns
+    # Subset to only the relevant columns
     payer_plan_df = payer_plan_df[
         [
             "person_id",
@@ -433,7 +450,7 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
             "payer_source_value",
         ]
     ]
-    # rename columns
+    # Rename columns
     payer_plan_df.columns = [
         "person_id",
         "start_date",
@@ -446,12 +463,12 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
         payer_plan_map[row.person_id].append(row._asdict())
 
     # care sites
-    care_site_map = pd.read_csv(
-        f"{path_to_metadata}/metadata.care_sites.csv", dtype=str
+    care_site_df = read_metadata_file(
+        path_to_metadata, "metadata.care_sites", dtype=str
     )
-    care_site_map["care_site_name"] = care_site_map["care_site_name"].fillna("NULL")
+    care_site_df["care_site_name"] = care_site_df["care_site_name"].fillna("NULL")
     care_site_map = {
-        row.care_site_id: row.care_site_name for row in care_site_map.itertuples()
+        row.care_site_id: row.care_site_name for row in care_site_df.itertuples()
     }
     metadata = {
         "provider": provider_map,
@@ -462,7 +479,7 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     return metadata
 
 
-def load_ontology(path_to_ontology: str) -> Ontology:
+def load_ontology(path_to_ontology: str) -> OntologyDescriptionLookupTable:
     ontology = OntologyDescriptionLookupTable()
     ontology.load(path_to_ontology)
     return ontology
@@ -940,43 +957,6 @@ def person_to_xml(person: Dict) -> Element:
         payerplan_elem.text = person["payer_plan"]
 
     return person_elem
-
-
-# def parse_flowsheet_event(event_xml):
-#     """
-#     Parse an XML event that is expected to have a code of
-#     'STANFORD_OBS/Flowsheet' and a JSON payload containing a
-#     'values' list of source/value pairs. Converts the JSON into
-#     a list with a single dictionary having simplified keys.
-
-#     Args:
-#         event_xml (str): The XML string representing the event.
-
-#     Returns:
-#         list: A list containing a single dictionary with keys such as
-#               'meas_value', 'units', 'disp_name'. If the event's code
-#               does not match, an empty list is returned.
-#     """
-#     # Parse the XML string
-#     root = ET.fromstring(event_xml)
-
-#     # Check if the event code is "STANFORD_OBS/Flowsheet"
-#     if root.attrib.get("code") != "STANFORD_OBS/Flowsheet":
-#         return []  # or raise an exception if preferred
-
-#     # Extract the JSON content from the event element's text
-#     json_text = root.text.strip()
-#     data = json.loads(json_text)
-
-#     # Build a dictionary from the "values" list using simplified keys.
-#     record = {}
-#     for item in data.get("values", []):
-#         # Extract the key from the source string (e.g., 'meas_value')
-#         key = item["source"].split(".")[-1]
-#         record[key] = item["value"]
-
-#     # Return the result as a list of dictionaries
-#     return [record]
 
 
 def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
