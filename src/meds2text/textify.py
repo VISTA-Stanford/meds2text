@@ -37,7 +37,24 @@ python src/meds2text/textify.py \
 --format lumia_xml \
 --include_contexts person providers care_sites \
 --apply_transforms \
---n_processes 1 
+--event_types "*" \
+--n_processes 1
+
+
+
+python src/meds2text/textify.py \
+--path_to_meds /Users/jfries/Desktop/foobar/meds_reader_omop_medalign/ \
+--path_to_ontology data/athena_omop_ontologies/ \
+--path_to_metadata data/omop_metadata/ \
+--path_to_output data/medalign_lumia_xml/ \
+--exclude_props clarity_table \
+--format lumia_xml \
+--include_contexts person providers care_sites \
+--apply_transforms \
+--event_types condition death device_exposure drug_exposure image measurement note observation procedure visit visit_detail \
+--n_processes 1
+
+
 
 
 # ARPA-H Feb 2025 
@@ -52,7 +69,26 @@ python src/vista/meds_to_text_mp.py \
 --apply_transforms \
 --batch_mode \
 --batch_size 5000 \
---n_processes 64
+--n_processes 64 \
+--event_types "*"
+
+# Example: Filter to only include note events
+python src/meds2text/textify.py \
+--path_to_meds /path/to/meds/ \
+--path_to_ontology data/athena_omop_ontologies/ \
+--path_to_metadata data/omop_metadata/ \
+--path_to_output data/notes_only/ \
+--format lumia_xml \
+--event_types note
+
+# Example: Filter to include multiple event types
+python src/meds2text/textify.py \
+--path_to_meds /path/to/meds/ \
+--path_to_ontology data/athena_omop_ontologies/ \
+--path_to_metadata data/omop_metadata/ \
+--path_to_output data/selected_events/ \
+--format lumia_xml \
+--event_types note condition_occurrence procedure_occurrence
 
 
 python src/vista/meds_to_text_mp.py \
@@ -117,7 +153,7 @@ def parse_args():
     parser.add_argument(
         "--exclude_props",
         nargs="+",
-        choices=["clarity_table", "image_series_uid", "image_study_uid", "visit_id"],
+        choices=["clarity_table", "image_series_uid", "image_study_uid", "provider_id", "visit_id"], 
         help="Specify properties to exclude from the output",
     )
     parser.add_argument(
@@ -140,6 +176,12 @@ def parse_args():
         type=int,
         default=1,
         help="Number of processes to use for multiprocessing (default: 1)",
+    )
+    parser.add_argument(
+        "--event_types",
+        nargs="+",
+        default=["*"],
+        help="List of event types to include, or '*' for all types (default: *)",
     )
     args = parser.parse_args()
     return args
@@ -1220,12 +1262,28 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     if "providers" in args.include_contexts:
                         encounter["metadata"].append(providers_xml)
 
+                # Parse event type filter
+                if args.event_types == ["*"]:
+                    allowed_event_types = None  # Include all types
+                else:
+                    allowed_event_types = set(args.event_types)
+                
                 time_bins = bin_by_time(events)
                 for ts, entries in time_bins.items():
+                    # Filter events by type if specified
+                    if allowed_event_types is not None:
+                        filtered_entries = [e for e in entries if e.table in allowed_event_types]
+                    else:
+                        filtered_entries = entries
+                    
+                    # Skip entries that have no events after filtering
+                    if not filtered_entries:
+                        continue
+                    
                     entry = {
                         "timestamp": ts,
                         "events": [
-                            event_to_xml(e, ontology, excluded_props) for e in entries
+                            event_to_xml(e, ontology, excluded_props) for e in filtered_entries
                         ],
                     }
                     encounter["events"].append(entry_to_xml(entry))
