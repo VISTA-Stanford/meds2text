@@ -34,7 +34,7 @@ python src/meds2text/textify.py \
 --path_to_meds meds_reader_omop_inspect/ \
 --path_to_ontology data/athena_omop_ontologies/ \
 --path_to_metadata data/omop_metadata/ \
---path_to_output data/medalign_lumia_xml/ \
+--path_to_output data/inspect_lumia_xml/ \
 --exclude_props clarity_table \
 --format lumia_xml \
 --include_contexts person providers care_sites \
