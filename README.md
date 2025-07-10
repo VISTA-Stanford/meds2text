@@ -1,4 +1,4 @@
-# MEDS-to-Text
+# MEDS-to-Text (`meds2text`)
 Transform MEDS-formatted data into text representations from OMOP CDM sources.
 
 > [!WARNING]
@@ -9,7 +9,7 @@ Transform MEDS-formatted data into text representations from OMOP CDM sources.
 
 - [Medalign: A clinician-generated dataset for instruction following with electronic medical records](https://ojs.aaai.org/index.php/AAAI/article/view/30205) (AAAI 2024)
 - [TIMER: Temporal Instruction Modeling and Evaluation for Longitudinal Clinical Records](https://arxiv.org/abs/2503.04176) (2025)
-- LUMIA (2025)
+
 
 ### Development Roadmap
 - [x] Initial refactor
@@ -106,6 +106,40 @@ python src/meds2text/textify.py \
 --event_types condition death device_exposure drug_exposure image measurement observation procedure visit visit_detail \
 --n_processes 8
 ```
+
+## 📊 Timeline Viewer
+
+After generating LUMIA XML files, you can use the interactive timeline viewer to visualize patient timelines in a web interface.
+
+![Timeline Viewer Screenshot](assets/timeline-viewer.png)
+
+### Features
+
+- **Interactive Timeline Visualization**: Browse patient encounters chronologically with collapsible sections
+- **Event Filtering**: Show/hide specific event types (visits, medications, procedures, notes, etc.)
+- **Search & Highlight**: Search across event names and values with regex support
+- **Heatmap View**: Color-code encounters based on event density
+- **Customizable Display**: Toggle note truncation, expand all sections, and invert timeline order
+
+### Usage
+
+Launch the timeline viewer with a directory containing XML files:
+
+```bash
+python apps/timeline_viewer/app.py \
+--timeline_dir data/inspect_lumia_xml/ \
+--person_id 125614144
+```
+
+**Parameters:**
+- `--timeline_dir`: Directory containing LUMIA XML timeline files
+- `--person_id`: Unique substring of XML filename to load on startup (optional)
+
+The viewer will launch a web interface where you can:
+1. Select different patients by entering a person ID
+2. Filter event types using checkboxes
+3. Search for specific terms or patterns
+4. Customize the display options
 
 ## 🛠️ Detailed Reproduction Steps
 
