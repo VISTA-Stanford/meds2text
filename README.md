@@ -176,6 +176,6 @@ See [here](https://github.com/VISTA-Stanford/ehr-tumorboard?tab=readme-ov-file#e
 
 ## 📄 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+Apache 2.0 License. See [LICENSE](LICENSE) for details.
 
 
