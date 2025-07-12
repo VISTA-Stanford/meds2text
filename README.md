@@ -145,11 +145,13 @@ The viewer will launch a web interface where you can:
 
 For mapping codes to text strings, we rely on medical vocabularies and ontologies. For MEDS extracted souced from OMOP CDM datasets, we can use a pre-packed collection of vocabularies.
 
-### 1. Athena Vocabularies
+### I. Athena Vocabularies
+
+The OMOP vocabulary is made available through the [Athena – OHDSI Vocabularies Repository](https://athena.ohdsi.org/). The majority of vocabularies can be redistributed for academic/non-commerical purposes, with the exception of CPT4. 
 
 #### ☁️ Option A. Download Prebuilt Dependencies from GCS
 
-If you have access to the Stanford VISTA project, you can download all dependencies from:
+If you have access to the Stanford VISTA project, you can download all prebuilt dependencies from:
 
 ```bash
 gsutil -m cp -r gs://su-vista/shah_lab/meds2text/data ./data
@@ -157,9 +159,16 @@ gsutil -m cp -r gs://su-vista/shah_lab/meds2text/data ./data
 
 #### 🏗️ Option B. Create from Scratch
 
-- Register and download the vocabularies from [OHDSI Athena](https://athena.ohdsi.org/vocabulary/list).
-- Generate an API KEY for your [UMLS account profile](https://uts.nlm.nih.gov/uts.html#profile) and use `cpt.sh` to download the CPT4 vocabulary and auto-update Athena vocabularies
-- Place the resulting folder (or zip file) in your `data/` directory (e.g., `data/athena_ontologies_snapshot/`).
+**1. Download Public Vocabularies**
+
+You can do either (1) download a [cached snapshot here](https://drive.google.com/drive/folders/1F59yqlGzyYOWQoa7nHQJSRc1gpl6Lo--?usp=sharing) OR (2) create an account and login to Athena to [download the most recent version of public vocabularies](https://athena.ohdsi.org/vocabulary/list).
+
+**2. Download and Update with the CPT4 Vocabulary** 
+
+- Generate an API KEY for your [UMLS account profile](https://uts.nlm.nih.gov/uts.html#profile) and use `cpt.sh` to download the CPT4 vocabulary and auto-update Athena vocabularies `./cpt.sh $NLM_API_KEY`
+- Place the updated vocabulary folder in your `data/` directory (e.g., `data/athena_ontologies_snapshot/`).
+
+**3. Create Dataframes and Prefix Trie** 
 
 Run the following script to initialize the parquet and trie files for fast ontology lookup.
 
@@ -170,7 +179,7 @@ python scripts/init_athena_ontologies.py \
 --save_parquet data/athena_omop_ontologies
 ```
 
-### 2. MEDS Extracts
+### II. MEDS Extracts
 
 See [here](https://github.com/VISTA-Stanford/ehr-tumorboard?tab=readme-ov-file#examples) for working instructions on generating STARR MEDS extracts.
 
