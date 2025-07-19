@@ -141,6 +141,11 @@ def parse_args():
         default=1,
         help="Number of processes to use for multiprocessing (default: 1)",
     )
+    parser.add_argument(
+        "--person_ids_file",
+        type=str,
+        help="Path to a CSV/TSV file with a 'person_id' column header containing person_ids to process instead of all subjects",
+    )
     args = parser.parse_args()
     return args
 
@@ -1056,6 +1061,86 @@ def fix_image_events(xml_root):
     return xml_root
 
 
+def load_and_validate_person_ids(person_ids_file: str, database) -> List[str]:
+    """
+    Load person IDs from a CSV/TSV file and validate they exist in the database.
+
+    Args:
+        person_ids_file: Path to CSV/TSV file containing person IDs with a 'person_id' column header
+        database: MEDS SubjectDatabase instance
+
+    Returns:
+        List of validated person IDs that exist in the database
+
+    Raises:
+        FileNotFoundError: If the person_ids_file doesn't exist
+        ValueError: If no valid person IDs are found or 'person_id' column is missing
+    """
+    if not os.path.exists(person_ids_file):
+        raise FileNotFoundError(f"Person IDs file not found: {person_ids_file}")
+
+    # Determine separator based on file extension
+    if person_ids_file.lower().endswith(".tsv"):
+        separator = "\t"
+    elif person_ids_file.lower().endswith(".csv"):
+        separator = ","
+    else:
+        # Try to auto-detect separator by reading the first line
+        with open(person_ids_file, "r") as f:
+            first_line = f.readline().strip()
+            if "\t" in first_line:
+                separator = "\t"
+            else:
+                separator = ","
+
+    # Load person IDs from CSV/TSV file
+    try:
+        df = pd.read_csv(person_ids_file, sep=separator)
+    except Exception as e:
+        raise ValueError(f"Error reading file {person_ids_file}: {e}")
+
+    # Check if 'person_id' column exists
+    if "person_id" not in df.columns:
+        raise ValueError(
+            f"'person_id' column not found in {person_ids_file}. Available columns: {list(df.columns)}"
+        )
+
+    # Extract person IDs and convert to strings
+    person_ids = df["person_id"].astype(str).dropna().tolist()
+
+    if not person_ids:
+        raise ValueError(
+            f"No person IDs found in 'person_id' column of {person_ids_file}"
+        )
+
+    # Get all available subject IDs from database
+    available_subject_ids = set(database)
+
+    # Validate and filter person IDs
+    valid_person_ids = []
+    missing_person_ids = []
+
+    for person_id in person_ids:
+        if person_id in available_subject_ids:
+            valid_person_ids.append(person_id)
+        else:
+            missing_person_ids.append(person_id)
+
+    # Report validation results
+    logger.info(f"Loaded {len(person_ids)} person IDs from {person_ids_file}")
+    logger.info(f"Found {len(valid_person_ids)} valid person IDs in database")
+
+    if missing_person_ids:
+        logger.warning(
+            f"Missing {len(missing_person_ids)} person IDs from database: {missing_person_ids[:10]}{'...' if len(missing_person_ids) > 10 else ''}"
+        )
+
+    if not valid_person_ids:
+        raise ValueError("No valid person IDs found in database")
+
+    return valid_person_ids
+
+
 #######################
 
 
@@ -1273,10 +1358,16 @@ def main(args):
     if not os.path.exists(args.path_to_output):
         os.makedirs(args.path_to_output)
 
-    if args.n_processes > 1:
-        # Load database once to obtain the list of subject IDs.
-        database = meds_reader.SubjectDatabase(args.path_to_meds)
+    # Load database once to obtain the list of subject IDs.
+    database = meds_reader.SubjectDatabase(args.path_to_meds)
+
+    # Determine which subject IDs to process
+    if args.person_ids_file:
+        subject_ids = load_and_validate_person_ids(args.person_ids_file, database)
+    else:
         subject_ids = list(database)
+
+    if args.n_processes > 1:
         # Partition subject_ids into roughly equal chunks.
         n = len(subject_ids)
         chunk_size = (n // args.n_processes) + (n % args.n_processes > 0)
@@ -1292,8 +1383,6 @@ def main(args):
             p.join()
     else:
         # Single-process mode: process all subject IDs in one go.
-        database = meds_reader.SubjectDatabase(args.path_to_meds)
-        subject_ids = list(database)
         process_subjects_chunk(subject_ids, args, process_id=0)
 
 
