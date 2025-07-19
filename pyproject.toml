@@ -33,6 +33,7 @@ dependencies = [
   "networkx>=3.0.0",
   "matplotlib>=3.5.0",
   "meds-reader",
+  "gradio>=4.0.0",
 ]
 description = "Transforms MEDS-formatted data to textual representations"
 keywords = ["meds", "healthcare", "data-transformation", "text-generation", "omop", "fhir"]
