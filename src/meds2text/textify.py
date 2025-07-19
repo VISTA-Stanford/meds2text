@@ -1109,7 +1109,7 @@ def fix_image_events(xml_root):
     return xml_root
 
 
-def load_and_validate_person_ids(person_ids_file: str, database) -> List[str]:
+def load_and_validate_person_ids(person_ids_file: str, database) -> List[int]:
     """
     Load person IDs from a CSV/TSV file and validate they exist in the database.
 
@@ -1118,7 +1118,7 @@ def load_and_validate_person_ids(person_ids_file: str, database) -> List[str]:
         database: MEDS SubjectDatabase instance
 
     Returns:
-        List of validated person IDs that exist in the database
+        List of validated person IDs (as integers) that exist in the database
 
     Raises:
         FileNotFoundError: If the person_ids_file doesn't exist
@@ -1161,8 +1161,8 @@ def load_and_validate_person_ids(person_ids_file: str, database) -> List[str]:
             f"No person IDs found in 'person_id' column of {person_ids_file}"
         )
 
-    # Get all available subject IDs from database
-    available_subject_ids = set(database)
+    # Get all available subject IDs from database and convert to strings for comparison
+    available_subject_ids = set(str(sid) for sid in database)
 
     # Validate and filter person IDs
     valid_person_ids = []
@@ -1170,7 +1170,8 @@ def load_and_validate_person_ids(person_ids_file: str, database) -> List[str]:
 
     for person_id in person_ids:
         if person_id in available_subject_ids:
-            valid_person_ids.append(person_id)
+            # Convert back to integer to match database key type
+            valid_person_ids.append(int(person_id))
         else:
             missing_person_ids.append(person_id)
 
