@@ -71,7 +71,7 @@
 
 ```xml
 <eventstream person_id="2129690">
-  <encounter start_timestamp="2013-10-10 19:08:00" end_timestamp="2018-12-07 23:59:00">
+  <encounter>
     <person>
       <birthdate>1970-05-01</birthdate>
       <age>
@@ -84,7 +84,20 @@
       </demographics>
       <payerplan>Medicare</payerplan>
     </person>
-    ...
+    <caresites>
+      <caresite care_site_id="526709" care_site_name="PRIMARY CARE"/>
+    </caresites>
+    <providers>
+      <provider provider_id="6738857" gender="NULL" speciality="Emergency Medicine" year_of_birth="NULL" care_site_name="NULL"/>
+      <provider provider_id="6758275" gender="MALE" speciality="Cardiovascular Disease" year_of_birth="1977" care_site_name="CARDIOVASCULAR MEDICINE"/>
+      <provider provider_id="6736378" gender="FEMALE" speciality="Internal Medicine" year_of_birth="1982" care_site_name="PRIMARY CARE"/>
+    </providers>
+    <events>
+      <entry timestamp="2014-08-10 23:59:59">
+        <event provider_id="6841964" type="drug_exposure" code="RxNorm/966220" name="levothyroxine sodium 0.025 MG Oral Tablet">start</event>
+      </entry>
+      ...
+    <events>	
   </encounter>
 </eventstream>
 ```
