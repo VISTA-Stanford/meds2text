@@ -430,11 +430,24 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     This function loads several OMOP tables for materializing metadata
     for the MEDS text linearization. Assumes the following tables are present:
 
-      - metadata.providers.csv or metadata.providers.csv.tz
-      - metadata.payer_plan.csv or metadata.payer_plan.csv.tz
-      - metadata.care_sites.csv or metadata.care_sites.csv.tz
+      - provider.csv or provider.csv.gz
+      - payer_plan_period.csv or payer_plan_period.csv.gz
+      - care_site.csv or care_site.csv.gz
 
     """
+    
+    def normalize_column_names(df):
+        """Normalize column names to lowercase for case-insensitive matching"""
+        df.columns = df.columns.str.lower()
+        return df
+    
+    def get_column_case_insensitive(df, col_name):
+        """Get column data using case-insensitive matching"""
+        col_name_lower = col_name.lower()
+        if col_name_lower in df.columns:
+            return df[col_name_lower]
+        else:
+            raise KeyError(f"Column '{col_name}' not found in dataframe. Available columns: {list(df.columns)}")
 
     def init_all_providers(metadata):
         """Requires provider and care_site tables"""
@@ -478,10 +491,12 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
 
     # providers
     provider_map_df = read_metadata_file(
-        path_to_metadata, "metadata.providers", dtype=str
+        path_to_metadata, "provider", dtype=str
     )
+    provider_map_df = normalize_column_names(provider_map_df)
     provider_map_df = provider_map_df.fillna("")
-    provider_map_df["gender_concept_id"] = provider_map_df["gender_concept_id"].replace(
+    gender_col = get_column_case_insensitive(provider_map_df, "gender_concept_id")
+    provider_map_df["gender_concept_id"] = gender_col.replace(
         {"8532": "FEMALE", "8507": "MALE", "0": ""}
     )
     provider_map = {
@@ -489,27 +504,44 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     }
 
     # payer plans
+    # First read without parse_dates to handle case insensitive column names
     payer_plan_df = read_metadata_file(
         path_to_metadata,
-        "metadata.payer_plan",
-        parse_dates=["payer_plan_period_start_DATE", "payer_plan_period_end_DATE"],
+        "payer_plan_period"
     )
-    # Subset to only the relevant columns
-    payer_plan_df = payer_plan_df[
-        [
-            "person_id",
-            "payer_plan_period_start_DATE",
-            "payer_plan_period_end_DATE",
-            "payer_source_value",
-        ]
-    ]
-    # Rename columns
-    payer_plan_df.columns = [
-        "person_id",
-        "start_date",
-        "end_date",
-        "payer_source_value",
-    ]
+    payer_plan_df = normalize_column_names(payer_plan_df)
+    
+    # Parse dates with case-insensitive column names
+    date_cols = []
+    for col in ["payer_plan_period_start_date", "payer_plan_period_end_date"]:
+        if col in payer_plan_df.columns:
+            date_cols.append(col)
+            payer_plan_df[col] = pd.to_datetime(payer_plan_df[col])
+    
+    # Subset to only the relevant columns (case insensitive)
+    required_cols = []
+    col_mapping = {
+        "person_id": "person_id",
+        "payer_plan_period_start_date": "payer_plan_period_start_date", 
+        "payer_plan_period_end_date": "payer_plan_period_end_date",
+        "payer_source_value": "payer_source_value"
+    }
+    
+    for expected_col in col_mapping.keys():
+        if expected_col in payer_plan_df.columns:
+            required_cols.append(expected_col)
+        else:
+            raise KeyError(f"Required column '{expected_col}' not found. Available columns: {list(payer_plan_df.columns)}")
+    
+    payer_plan_df = payer_plan_df[required_cols]
+    # Rename columns to standardized names
+    column_rename_map = {
+        "person_id": "person_id",
+        "payer_plan_period_start_date": "start_date",
+        "payer_plan_period_end_date": "end_date", 
+        "payer_source_value": "payer_source_value"
+    }
+    payer_plan_df = payer_plan_df.rename(columns=column_rename_map)
 
     payer_plan_map = collections.defaultdict(list)
     for row in payer_plan_df.itertuples():
@@ -517,9 +549,11 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
 
     # care sites
     care_site_df = read_metadata_file(
-        path_to_metadata, "metadata.care_sites", dtype=str
+        path_to_metadata, "care_site", dtype=str
     )
-    care_site_df["care_site_name"] = care_site_df["care_site_name"].fillna("NULL")
+    care_site_df = normalize_column_names(care_site_df)
+    care_site_name_col = get_column_case_insensitive(care_site_df, "care_site_name")
+    care_site_df["care_site_name"] = care_site_name_col.fillna("NULL")
     care_site_map = {
         row.care_site_id: row.care_site_name for row in care_site_df.itertuples()
     }
