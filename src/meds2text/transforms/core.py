@@ -113,6 +113,14 @@ def delta_encode(
     return subject
 
 
+def is_visit_table(table_name: str) -> bool:
+    """Check if a table name represents a visit table.
+    
+    Handles both short form (visit) and long form (visit_occurrence) table names.
+    """
+    return table_name in ("visit", "visit_occurrence")
+
+
 def _move_date_to_end(
     d: datetime.datetime,
 ) -> datetime.datetime:
@@ -151,7 +159,7 @@ def move_visit_start_to_first_event_start(
 
     # Find the stated start time for each visit
     for event in subject.events:
-        if event.table == "visit":
+        if is_visit_table(event.table):
             if (
                 event.visit_id in visit_starts
                 and visit_starts[event.visit_id] != event.time
@@ -178,7 +186,7 @@ def move_visit_start_to_first_event_start(
 
     # Assign visit start times to be same as first non-visit event with same visit ID
     for event in subject.events:
-        if event.table == "visit":
+        if is_visit_table(event.table):
             # Triggers if there is a non-visit event associated with the visit ID that has
             # start time strictly after the recorded visit start
             if event.visit_id in first_event_starts:
