@@ -153,14 +153,7 @@ def parse_args():
     parser.add_argument(
         "--exclude_props",
         nargs="+",
-        choices=[
-            "clarity_table",
-            "image_series_uid",
-            "image_study_uid",
-            "provider_id",
-            "visit_id",
-        ],
-        help="Specify properties to exclude from the output",
+        help="Specify properties to exclude from the output (any property name is allowed)",
     )
     parser.add_argument(
         "--batch_mode",
@@ -193,6 +186,12 @@ def parse_args():
         nargs="+",
         default=["*"],
         help="List of event types to include, or '*' for all types (default: *)",
+    )
+    parser.add_argument(
+        "--attribute_order",
+        nargs="+",
+        default=None,
+        help="Order of XML attributes (default: table, code, name). Attributes not listed will be appended in their original order.",
     )
     args = parser.parse_args()
     return args
@@ -237,7 +236,7 @@ def omop_drop_orphan_events(
     # only keep visits if they have a valid start and end datetime
     visit_ids = set()
     for event in subject.events:
-        if event.table != "visit":
+        if not is_visit_table(event.table):
             continue
         if hasattr(event, "visit_id") and event.end is not None:
             visit_ids.add(event.visit_id)
@@ -246,13 +245,84 @@ def omop_drop_orphan_events(
     subject.events = [
         event
         for event in subject.events
-        if event.table in {"person"} or getattr(event, "visit_id", None) in visit_ids
+        if event.table == "person" or getattr(event, "visit_id", None) in visit_ids
     ]
     return subject
 
 
 #####################################
-# flowsheet parsing
+# Modular Event Parsers
+# Each parser is a function that takes an event and returns a dict of properties to update
+
+
+def parse_flowsheet_event(event, subject_id=None):
+    """
+    Parse STANFORD_OBS/Flowsheet events with complex JSON structure.
+    
+    Parses two JSON columns:
+    1. text_value (value_as_string): Contains measurement data
+       - ip_flwsht_meas.meas_value → text_value (the measurement)
+       - ip_flo_gp_data.disp_name → name attribute
+       - ip_flo_gp_data.units → unit_source_value attribute
+    2. observation_source_value: Contains panel/group name
+       - ip_flt_data.display_name → group_name attribute
+    """
+    props = {}
+    
+    # Get values from event - events support dict-like iteration
+    event_dict = {k: v for k, v in event}
+    text_value = event_dict.get("text_value")
+    observation_source_value = event_dict.get("observation_source_value")
+    
+    # Parse text_value JSON (value_as_string column)
+    if text_value:
+        try:
+            value_json = json.loads(text_value)
+            if value_json and "values" in value_json:
+                for item in value_json["values"]:
+                    source = item.get("source", "")
+                    val = item.get("value")
+                    
+                    if source == "ip_flwsht_meas.meas_value":
+                        # Measurement value becomes the text_value
+                        props["text_value"] = str(val) if val is not None else None
+                    elif source == "ip_flo_gp_data.disp_name":
+                        # Display name becomes the name attribute
+                        props["name"] = str(val) if val is not None else None
+                    elif source == "ip_flo_gp_data.units":
+                        # Units become unit_source_value attribute
+                        props["unit_source_value"] = str(val) if val is not None else None
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(
+                f"Failed to parse flowsheet text_value JSON - person_id={subject_id}, "
+                f"error={str(e)}, text_value={str(text_value)[:200] if text_value else 'None'}"
+            )
+    
+    # Parse observation_source_value JSON (group/panel name)
+    if observation_source_value:
+        try:
+            obs_json = json.loads(observation_source_value)
+            if obs_json and "values" in obs_json:
+                for item in obs_json["values"]:
+                    source = item.get("source", "")
+                    val = item.get("value")
+                    
+                    if source == "ip_flt_data.display_name":
+                        # Panel/group name becomes group_name attribute
+                        props["group_name"] = str(val) if val is not None else None
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(
+                f"Failed to parse flowsheet observation_source_value JSON - person_id={subject_id}, "
+                f"error={str(e)}, observation_source_value={str(observation_source_value)[:200] if observation_source_value else 'None'}"
+            )
+    
+    return props
+
+
+# Parser registry: maps event codes to parser functions
+EVENT_PARSERS = {
+    "STANFORD_OBS/Flowsheet": parse_flowsheet_event,
+}
 
 
 def get_flowsheet_dict(observation_json):
@@ -316,29 +386,35 @@ def interpret_key_value(anchor_datetime: datetime, key: str, value: int | str) -
 def import_flowsheet_events(
     subject: meds_reader.transform.MutableSubject,
 ) -> meds_reader.transform.MutableSubject:
-    """Flowsheet values are stored as a JSON object. We transform these
-    to be properties of the event object, applying
-    - date/time integers: some timestamps are represented in integer offset time.
-                          we convert these to datetime strings like timestamp
+    """
+    Apply modular event parsers to transform events based on their code.
+    
+    Each event code can have a custom parser that extracts/transforms properties
+    from JSON columns or other complex structures.
     """
     events = []
     for event in subject.events:
-
-        if event.code == "STANFORD_OBS/Flowsheet":
-            flowsheet_data = json.loads(event.text_value)
-            props = {k: v for k, v in event if k not in ("time", "code")}
-            if flowsheet_data:
-                fs_props = get_flowsheet_dict(flowsheet_data)
-                # transform dates if necessary
-                props["text_value"] = interpret_key_value(
-                    event.time, fs_props["display"], fs_props["value"]
-                )
-                if fs_props["unit"] is not None:
-                    props["unit"] = fs_props["unit"]
-                props["name"] = fs_props["display"]
-
+        # Check if there's a parser for this event code
+        parser = EVENT_PARSERS.get(event.code)
+        
+        if parser:
+            # Get existing properties (excluding time, code, and columns that will be parsed)
+            # For flowsheet events, also exclude value_as_string
+            exclude_keys = ("time", "code", "text_value", "observation_source_value")
+            if event.code == "STANFORD_OBS/Flowsheet":
+                exclude_keys = exclude_keys + ("value_as_string",)
+            props = {k: v for k, v in event if k not in exclude_keys}
+            
+            # Apply the parser to get updated properties
+            parsed_props = parser(event, subject_id=subject.subject_id)
+            
+            # Merge parsed properties into props (parsed props take precedence)
+            props.update(parsed_props)
+            
+            # Create new event with updated properties
             events.append(MutableEvent(event.time, event.code, props))
         else:
+            # No parser, keep event as-is
             events.append(event)
 
     subject.events = events
@@ -471,10 +547,12 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
             care_site_id = (
                 provider["care_site_id"] if provider["care_site_id"] else None
             )
-            props["care_site_id"] = care_site_id
+            # Convert to string for consistent key matching
+            care_site_id_str = str(care_site_id) if care_site_id else None
+            props["care_site_id"] = care_site_id_str
 
-            if care_site_id and care_site_id in care_site_map:
-                props["care_site_name"] = metadata["care_site"][care_site_id]
+            if care_site_id_str and care_site_id_str in care_site_map:
+                props["care_site_name"] = metadata["care_site"][care_site_id_str]
             else:
                 props["care_site_name"] = None
 
@@ -499,8 +577,11 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     provider_map_df["gender_concept_id"] = gender_col.replace(
         {"8532": "FEMALE", "8507": "MALE", "0": ""}
     )
+    # Ensure provider_id is string for consistent key matching
+    provider_id_col = get_column_case_insensitive(provider_map_df, "provider_id")
     provider_map = {
-        row.provider_id: row._asdict() for row in provider_map_df.itertuples()
+        str(row.provider_id): row._asdict() 
+        for row in provider_map_df.itertuples()
     }
 
     # payer plans
@@ -553,9 +634,10 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
     )
     care_site_df = normalize_column_names(care_site_df)
     care_site_name_col = get_column_case_insensitive(care_site_df, "care_site_name")
-    care_site_df["care_site_name"] = care_site_name_col.fillna("NULL")
+    care_site_df["care_site_name"] = care_site_name_col.fillna("_")
+    # Ensure care_site_id is string for consistent key matching
     care_site_map = {
-        row.care_site_id: row.care_site_name for row in care_site_df.itertuples()
+        str(row.care_site_id): row.care_site_name for row in care_site_df.itertuples()
     }
     metadata = {
         "provider": provider_map,
@@ -882,7 +964,7 @@ def xml_to_fhir_like(xml_string):
             timestamp = entry.get("timestamp")
 
             for event in entry.findall("event"):
-                event_type = event.get("type")
+                event_type = event.get("table")
 
                 if event_type == "measurement":
                     observation = {
@@ -1046,21 +1128,47 @@ def person_to_xml(person: Dict) -> Element:
     return person_elem
 
 
-def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
-    """ """
+# Module-level variable for tracking current subject ID
+_current_subject_id = None
+
+def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_order: List[str] = None) -> str:
+    """
+    Convert an event to an XML element.
+    
+    Note: excluded_props only affects which attributes appear in the XML output.
+    All event properties remain available for internal processing (e.g., parsers can
+    still access observation_source_value and value_as_string even if excluded).
+    
+    Args:
+        attribute_order: List of attribute names in desired order. Attributes not in this
+                        list will be appended in their original order. Default: ["table", "code", "name"]
+    """
+    global _current_subject_id
     excluded_props = excluded_props or set()
-    remap = {"table": "type"}
+    if attribute_order is None:
+        attribute_order = ["table", "code", "name"]
 
     # code description / name
     if event.code != "STANFORD_OBS/Flowsheet":
         name = ontology.get_description(event.code) or ""
 
+    # Build attributes dict - excluded_props filters what appears as XML attributes
+    # but the original event still contains all properties for processing
     attributes = {
-        remap[key] if key in remap else key: value
+        key: value
         for key, value in event
         if key not in excluded_props
     }
-    value = attributes.get("numeric_value") or attributes.get("text_value") or None
+    
+    # For flowsheet events, ensure we use the parsed text_value
+    # Don't let it fall back to code or other values
+    if event.code == "STANFORD_OBS/Flowsheet":
+        value = attributes.get("text_value")  # Use text_value directly, don't fall back
+        # If text_value is None or empty, keep it as None (don't use code)
+        if value == "" or value == "NULL":
+            value = None
+    else:
+        value = attributes.get("numeric_value") or attributes.get("text_value") or None
 
     # cleanup keynames
     if "name" not in attributes:
@@ -1068,7 +1176,32 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
     attributes.pop("numeric_value", None)
     attributes.pop("text_value", None)
 
-    event_element = Element("event", **attributes)
+    # Use provided attribute_order or default
+    # Attributes not in this list will be appended at the end in their original order
+    
+    # Convert all attribute values to strings (XML requires string attributes)
+    # Use 'attr_value' instead of 'value' to avoid shadowing the 'value' variable
+    # Use "_" as sentinel for NULL values instead of "NULL"
+    xml_attributes = {
+        key: sanitize_xml_text(str(attr_value)) if attr_value is not None else "_"
+        for key, attr_value in attributes.items()
+        # Omit 'name' attribute if it's empty
+        if not (key == "name" and (attr_value is None or attr_value == ""))
+    }
+    
+    # Create element first, then set attributes in desired order
+    event_element = Element("event")
+    
+    # Set attributes in preferred order first
+    for key in attribute_order:
+        if key in xml_attributes:
+            event_element.set(key, xml_attributes[key])
+    
+    # Set remaining attributes in their original order
+    # Use 'attr_val' instead of 'value' to avoid shadowing the 'value' variable
+    for key, attr_val in xml_attributes.items():
+        if key not in attribute_order:
+            event_element.set(key, attr_val)
 
     # event type (numeric, text, indicator)
     event_element.text = (
@@ -1086,7 +1219,8 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
     )
 
     # some text values are mappings to concepts, e.g., OMOP_CONCEPT_ID/{concept_id}
-    if value is not None:
+    # BUT: Don't override flowsheet values - they are already parsed measurements
+    if value is not None and event.code != "STANFORD_OBS/Flowsheet":
         code_value_description = ontology.get_description(str(value))
         if code_value_description:
             event_element.text = code_value_description
@@ -1121,7 +1255,7 @@ def dict_to_xml(
                 sub_elem = SubElement(child_elem, key)
                 sub_elem.append(value)
             else:
-                child_elem.set(key, str(value) if value is not None else "NULL")
+                child_elem.set(key, str(value) if value is not None else "_")
 
     return parent_elem
 
@@ -1133,8 +1267,8 @@ def dict_to_xml(
 def fix_image_events(xml_root):
     # Iterate through all event elements in the XML tree
     for event in xml_root.xpath(".//event"):
-        # Check if the event has type="image"
-        if event.get("type") == "image":
+        # Check if the event has table="image"
+        if event.get("table") == "image":
             # Get the attribute values
             anatomic_site = event.get("anatomic_site_source_value", "")
             modality = event.get("modality_source_value", "")
@@ -1238,6 +1372,12 @@ def process_subjects_chunk(subject_ids, args, process_id):
     metadata = load_metadata(args.path_to_metadata)
     database = meds_reader.SubjectDatabase(args.path_to_meds)
 
+    # Track missing provider_ids and care_site_ids for logging
+    all_provider_ids_seen = set()
+    missing_provider_ids = set()
+    all_care_site_ids_seen = set()
+    missing_care_site_ids = set()
+
     # Transformation stack
     transforms = [
         to_mutable_subject,
@@ -1302,6 +1442,9 @@ def process_subjects_chunk(subject_ids, args, process_id):
 
     try:
         for i, subject_id in enumerate(subject_ids):
+            # Set current subject_id for debug logging
+            global _current_subject_id
+            _current_subject_id = subject_id
             subject = database[subject_id]
             if args.apply_transforms:
                 subject = apply_transforms(subject, transforms=transforms)
@@ -1337,10 +1480,19 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     for event in events:
                         provider_id = getattr(event, "provider_id", None)
                         care_site_id = getattr(event, "care_site_id", None)
-                        if provider_id:
-                            providers.add(provider_id)
-                        if care_site_id:
-                            care_sites.add(care_site_id)
+                        # Convert to string to match metadata keys (loaded with dtype=str)
+                        if provider_id is not None:
+                            provider_id_str = str(provider_id)
+                            providers.add(provider_id_str)
+                            all_provider_ids_seen.add(provider_id_str)
+                            if provider_id_str not in metadata["provider"]:
+                                missing_provider_ids.add(provider_id_str)
+                        if care_site_id is not None:
+                            care_site_id_str = str(care_site_id)
+                            care_sites.add(care_site_id_str)
+                            all_care_site_ids_seen.add(care_site_id_str)
+                            if care_site_id_str not in metadata["care_site"]:
+                                missing_care_site_ids.add(care_site_id_str)
 
                     payer_plan = (
                         get_payer_plan_coverage(
@@ -1358,14 +1510,16 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     )
                     person = person_to_xml(person_values)
 
+                    # Note: Missing providers are already tracked above when collecting provider_ids
+                    
                     care_sites.update(
                         metadata["provider"][p]["care_site_id"]
                         for p in providers
-                        if metadata["provider"][p]["care_site_id"]
+                        if p in metadata["provider"] and metadata["provider"][p].get("care_site_id")
                     )
 
                     providers_xml = dict_to_xml(
-                        [metadata["provider"][p] for p in providers],
+                        [metadata["provider"][p] for p in providers if p in metadata["provider"]],
                         "providers",
                         "provider",
                         excluded_props,
@@ -1374,9 +1528,10 @@ def process_subjects_chunk(subject_ids, args, process_id):
                         [
                             {
                                 "care_site_id": cs,
-                                "care_site_name": metadata["care_site"][cs],
+                                "care_site_name": metadata["care_site"].get(cs, "_"),
                             }
                             for cs in care_sites
+                            if cs in metadata["care_site"]
                         ],
                         "caresites",
                         "caresite",
@@ -1411,7 +1566,7 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     entry = {
                         "timestamp": ts,
                         "events": [
-                            event_to_xml(e, ontology, excluded_props)
+                            event_to_xml(e, ontology, excluded_props, args.attribute_order)
                             for e in filtered_entries
                         ],
                     }
@@ -1447,6 +1602,35 @@ def process_subjects_chunk(subject_ids, args, process_id):
 
             if args.test_mode and i > 20:
                 break
+        
+        # Log summary statistics for missing provider_ids and care_site_ids
+        total_provider_ids = len(all_provider_ids_seen)
+        if total_provider_ids > 0:
+            missing_provider_pct = (len(missing_provider_ids) / total_provider_ids) * 100
+            logger.info(
+                f"Process {process_id}: Missing provider_ids: {len(missing_provider_ids)}/{total_provider_ids} "
+                f"({missing_provider_pct:.2f}%)"
+            )
+            if missing_provider_ids:
+                logger.warning(
+                    f"Process {process_id}: Missing provider_ids (first 20): {list(missing_provider_ids)[:20]}"
+                )
+        else:
+            logger.info(f"Process {process_id}: No provider_ids encountered")
+        
+        total_care_site_ids = len(all_care_site_ids_seen)
+        if total_care_site_ids > 0:
+            missing_care_site_pct = (len(missing_care_site_ids) / total_care_site_ids) * 100
+            logger.info(
+                f"Process {process_id}: Missing care_site_ids: {len(missing_care_site_ids)}/{total_care_site_ids} "
+                f"({missing_care_site_pct:.2f}%)"
+            )
+            if missing_care_site_ids:
+                logger.warning(
+                    f"Process {process_id}: Missing care_site_ids (first 20): {list(missing_care_site_ids)[:20]}"
+                )
+        else:
+            logger.info(f"Process {process_id}: No care_site_ids encountered")
     finally:
         if batch_file:
             batch_file.close()

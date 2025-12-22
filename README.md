@@ -1,4 +1,30 @@
-# MEDS-to-Text (`meds2text`)
+<h1 align="center">
+  <a href=""><img src="assets/logo.png" alt="pipelines" width="200"></a>
+  <br>
+   MEDS-to-Text (<code>meds2text</code>)
+  <br>
+</h1>
+
+<div align="center">
+
+  <a href="https://www.python.org/downloads/">
+    <img src="https://img.shields.io/badge/python-%3E%3D3.9-blue" alt="Python >= 3.9">
+  </a>
+  <a href="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml">
+    <img src="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests">
+  </a>
+  <a href="https://github.com/VISTA-Stanford/meds2text/graphs/commit-activity">
+    <img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained">
+  </a>
+  <a href="https://github.com/psf/black">
+    <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black">
+  </a>
+  <a href="https://github.com/VISTA-Stanford/meds2text/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+
+</div>
+
 Transform MEDS-formatted data into text representations from OMOP CDM sources.
 
 > [!WARNING]
@@ -8,17 +34,7 @@ Transform MEDS-formatted data into text representations from OMOP CDM sources.
 ### Projects Using `meds2text`
 
 - [Medalign: A clinician-generated dataset for instruction following with electronic medical records](https://ojs.aaai.org/index.php/AAAI/article/view/30205) (AAAI 2024)
-- [TIMER: Temporal Instruction Modeling and Evaluation for Longitudinal Clinical Records](https://arxiv.org/abs/2503.04176) (2025)
-
-
-### Development Roadmap
-- [x] Initial refactor
-- [ ] Remove hard-coded OMOP/Stanford MEDS assumptions
-- [ ] Refactor for modular subclassing of new formatters
-- [ ] Implement yaml configuration files 
-- [ ] Implement rule-based FHIR formatter using [fhir.resources](https://github.com/nazrulworld/fhir.resources)
-- [ ] Implement model-based event decoder 
-
+- [TIMER: Temporal Instruction Modeling and Evaluation for Longitudinal Clinical Records](https://arxiv.org/abs/2503.04176) (npj Digital Medicine 2025)
 
 ## 🚀 Installation
 
