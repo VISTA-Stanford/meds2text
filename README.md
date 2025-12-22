@@ -8,7 +8,7 @@
 <div align="center">
 
   <a href="https://www.python.org/downloads/">
-    <img src="https://img.shields.io/badge/python-%3E%3D3.9-blue" alt="Python >= 3.9">
+    <img src="https://img.shields.io/badge/python-%3E%3D3.10-blue" alt="Python >= 3.10">
   </a>
   <a href="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml">
     <img src="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests">
