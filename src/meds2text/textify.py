@@ -107,6 +107,7 @@ python src/vista/meds_to_text_mp.py \
 
 import argparse
 import collections
+import fnmatch
 import json
 import logging
 import multiprocessing
@@ -201,6 +202,12 @@ def parse_args():
         default=None,
         help="Order of XML attributes (default: table, code, name). Attributes not listed will be appended in their original order.",
     )
+    parser.add_argument(
+        "--exclude_codes",
+        nargs="+",
+        default=None,
+        help="Patterns to exclude events by code (supports wildcards like 'STANFORD_OBS/*'). Events matching any pattern will be excluded.",
+    )
     args = parser.parse_args()
     return args
 
@@ -215,7 +222,7 @@ def is_within_time_window(
 ) -> bool:
     """Check if two timestamps are within a given time window"""
     delta = abs(timestamp1 - timestamp2)
-    return delta <= datetime.timedelta(minutes=time_window_minutes)
+    return delta <= timedelta(minutes=time_window_minutes)
 
 
 def create_mutable_event(event) -> MutableEvent:
@@ -370,7 +377,7 @@ def convert_shc_time(time_int: int) -> timedelta:
     Converts a Stanford Health Care time integer (seconds since midnight)
     into a timedelta.
     """
-    return datetime.timedelta(seconds=time_int)
+    return timedelta(seconds=time_int)
 
 
 def interpret_key_value(anchor_datetime: datetime, key: str, value: int | str) -> str:
@@ -666,13 +673,33 @@ def load_ontology(path_to_ontology: str) -> OntologyDescriptionLookupTable:
 
 def sanitize_xml_text(text: str) -> str:
     """
-    Remove characters that are illegal in XML:
+    Remove characters that are illegal in XML and fix Unicode issues:
     - Control characters except tab (\x09), newline (\x0a), and carriage return (\x0d).
     - Null bytes (\x00).
+    - Invalid Unicode surrogate pairs (U+D800 to U+DFFF).
+    - Characters that can't be encoded in UTF-8.
     """
+    if not isinstance(text, str):
+        text = str(text)
+
+    # Remove control characters (except tab, newline, carriage return)
     # This regex matches characters in the ranges:
     #   \x00-\x08, \x0B-\x0C, and \x0E-\x1F
-    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+
+    # Remove invalid Unicode surrogate pairs (U+D800 to U+DFFF)
+    # These are invalid in XML and can cause encoding issues
+    text = re.sub(r"[\uD800-\uDFFF]", "", text)
+
+    # Ensure the string can be encoded as UTF-8
+    # Replace any characters that can't be encoded with XML character references
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # If encoding fails, replace problematic characters
+        text = text.encode("utf-8", errors="xmlcharrefreplace").decode("utf-8")
+
+    return text
 
 
 def calculate_age(start_date: datetime, end_date: datetime):
@@ -763,7 +790,7 @@ def is_non_overlapping(intervals):
     return True
 
 
-def fuzzy_partition(rows, max_mismatches=1, max_timedelta=datetime.timedelta(hours=24)):
+def fuzzy_partition(rows, max_mismatches=1, max_timedelta=timedelta(hours=24)):
     """
     Partition rows into groups using a dominant id with fuzzy glitch merging,
     subject to two extra constraints:
@@ -1075,10 +1102,39 @@ def get_person_values(
             if event.code == "MEDS_BIRTH":
                 person["birth"] = event.time
             else:
-                match = re.match(r"^(Ethnicity|Gender|Race)/", event.code)
+                # Check for Race, Ethnicity, Gender prefixes (handle various formats)
+                code_str = str(event.code) if event.code else ""
+                match = re.match(
+                    r"^(Race|Ethnicity|Gender)[/_](.+)$", code_str, re.IGNORECASE
+                )
                 if match:
                     tag = match.group(1).lower()
-                    person[tag] = ontology.get_description(event.code)
+                    concept_id = match.group(2)  # Extract concept ID after the slash
+
+                    # Try to get description from ontology using various code formats
+                    description = None
+                    if event.code:
+                        # Try the full code as-is first (e.g., "Gender/8532")
+                        description = ontology.get_description(event.code)
+
+                        # If that fails, try extracting concept ID and looking it up
+                        # with different vocabulary prefixes
+                        if not description and concept_id:
+                            # Try various formats the ontology might expect
+                            # OMOP concept IDs are often stored as OMOP_CONCEPT_ID/{concept_id}
+                            for code_format in [
+                                f"OMOP_CONCEPT_ID/{concept_id}",  # OMOP_CONCEPT_ID/8532 (most likely)
+                                concept_id,  # Just the number (e.g., "8532")
+                                f"OMOP/{concept_id}",  # OMOP/8532
+                                f"CONCEPT/{concept_id}",  # CONCEPT/8532
+                                f"SNOMED/{concept_id}",  # SNOMED/8532 (in case it's SNOMED)
+                            ]:
+                                description = ontology.get_description(code_format)
+                                if description:
+                                    break
+
+                    # Store both code and description as a dict
+                    person[tag] = {"code": event.code, "description": description}
                 else:
                     logger.error(f"Unexpected event code: {event.code}")
 
@@ -1113,22 +1169,74 @@ def person_to_xml(person: Dict) -> Element:
             years_elem.text = str(person["age_in_years"])
 
     # Demographics
-    if "ethnicity" in person or "gender" in person or "race" in person:
+    # Only create demographics section if we have at least one value with a description
+    has_demographics = False
+    if "ethnicity" in person:
+        ethnicity_data = person["ethnicity"]
+        if isinstance(ethnicity_data, dict):
+            has_demographics = has_demographics or bool(
+                ethnicity_data.get("description")
+            )
+        else:
+            has_demographics = has_demographics or bool(ethnicity_data)
+    if "gender" in person:
+        gender_data = person["gender"]
+        if isinstance(gender_data, dict):
+            has_demographics = has_demographics or bool(gender_data.get("description"))
+        else:
+            has_demographics = has_demographics or bool(gender_data)
+    if "race" in person:
+        race_data = person["race"]
+        if isinstance(race_data, dict):
+            has_demographics = has_demographics or bool(race_data.get("description"))
+        else:
+            has_demographics = has_demographics or bool(race_data)
+
+    if has_demographics:
         demographics_elem = SubElement(person_elem, "demographics")
         if "ethnicity" in person:
-            ethnicity_elem = SubElement(demographics_elem, "ethnicity")
-            ethnicity_elem.text = person["ethnicity"]
+            ethnicity_data = person["ethnicity"]
+            if isinstance(ethnicity_data, dict):
+                description = ethnicity_data.get("description")
+                if description:  # Only create element if we have a description
+                    ethnicity_elem = SubElement(demographics_elem, "ethnicity")
+                    ethnicity_elem.set("code", str(ethnicity_data.get("code", "")))
+                    ethnicity_elem.text = str(description).strip()
+            else:
+                if ethnicity_data:  # Only create element if we have a value
+                    ethnicity_elem = SubElement(demographics_elem, "ethnicity")
+                    ethnicity_elem.text = str(ethnicity_data).strip()
         if "gender" in person:
-            gender_elem = SubElement(demographics_elem, "gender")
-            gender_elem.text = person["gender"]
+            gender_data = person["gender"]
+            if isinstance(gender_data, dict):
+                description = gender_data.get("description")
+                if description:  # Only create element if we have a description
+                    gender_elem = SubElement(demographics_elem, "gender")
+                    gender_elem.set("code", str(gender_data.get("code", "")))
+                    gender_elem.text = str(description).strip()
+            else:
+                if gender_data:  # Only create element if we have a value
+                    gender_elem = SubElement(demographics_elem, "gender")
+                    gender_elem.text = str(gender_data).strip()
         if "race" in person:
-            gender_elem = SubElement(demographics_elem, "race")
-            gender_elem.text = person["race"]
+            race_data = person["race"]
+            if isinstance(race_data, dict):
+                description = race_data.get("description")
+                if description:  # Only create element if we have a description
+                    race_elem = SubElement(demographics_elem, "race")
+                    race_elem.set("code", str(race_data.get("code", "")))
+                    race_elem.text = str(description).strip()
+            else:
+                if race_data:  # Only create element if we have a value
+                    race_elem = SubElement(demographics_elem, "race")
+                    race_elem.text = str(race_data).strip()
 
     # Payer plan
     if "payer_plan" in person:
         payerplan_elem = SubElement(person_elem, "payerplan")
-        payerplan_elem.text = person["payer_plan"]
+        payerplan_elem.text = (
+            str(person["payer_plan"]).strip() if person["payer_plan"] else ""
+        )
 
     return person_elem
 
@@ -1281,6 +1389,35 @@ def fix_image_events(xml_root):
     return xml_root
 
 
+def remove_null_elements(xml_root):
+    """
+    Remove XML elements that have all attributes set to "_" (null sentinel value).
+    This cleans up elements like <provider gender="_" speciality="_" year_of_birth="_" care_site_name="_"/>
+    """
+    # Find all elements that need to be checked
+    # We need to iterate backwards to avoid modifying the tree while iterating
+    elements_to_remove = []
+
+    for elem in xml_root.iter():
+        # Skip if element has no attributes
+        if not elem.attrib:
+            continue
+
+        # Check if all attributes are "_"
+        all_null = all(value == "_" for value in elem.attrib.values())
+
+        if all_null:
+            elements_to_remove.append(elem)
+
+    # Remove elements (iterating backwards through the list)
+    for elem in reversed(elements_to_remove):
+        parent = elem.getparent()
+        if parent is not None:
+            parent.remove(elem)
+
+    return xml_root
+
+
 def load_and_validate_person_ids(person_ids_file: str, database) -> List[int]:
     """
     Load person IDs from a CSV/TSV file and validate they exist in the database.
@@ -1419,7 +1556,11 @@ def process_subjects_chunk(subject_ids, args, process_id):
         return json.dumps(xml_to_json(tostring(root)), indent=2)
 
     def convert_lumia_xml(root):
-        return tostring(root, encoding="unicode", pretty_print=True)
+        # Generate XML with UTF-8 encoding declaration
+        xml_bytes = tostring(
+            root, encoding="utf-8", pretty_print=True, xml_declaration=True
+        )
+        return xml_bytes.decode("utf-8")
 
     def convert_fhir_like_json(root):
         return json.dumps(xml_to_fhir_like(tostring(root)), indent=2)
@@ -1536,7 +1677,7 @@ def process_subjects_chunk(subject_ids, args, process_id):
                         ],
                         "providers",
                         "provider",
-                        excluded_props,
+                        excluded_props=None,  # excluded_props only applies to events, not providers
                     )
                     care_sites_xml = dict_to_xml(
                         [
@@ -1549,6 +1690,7 @@ def process_subjects_chunk(subject_ids, args, process_id):
                         ],
                         "caresites",
                         "caresite",
+                        excluded_props=None,  # excluded_props only applies to events, not care_sites
                     )
                     if "person" in args.include_contexts:
                         encounter["metadata"].append(person)
@@ -1563,6 +1705,20 @@ def process_subjects_chunk(subject_ids, args, process_id):
                 else:
                     allowed_event_types = set(args.event_types)
 
+                # Parse code exclusion patterns
+                exclude_code_patterns = args.exclude_codes if args.exclude_codes else []
+
+                def should_exclude_event(event):
+                    """Check if an event should be excluded based on code patterns."""
+                    if not exclude_code_patterns:
+                        return False
+                    event_code = str(event.code) if hasattr(event, "code") else ""
+                    # Check if event code matches any exclusion pattern
+                    for pattern in exclude_code_patterns:
+                        if fnmatch.fnmatch(event_code, pattern):
+                            return True
+                    return False
+
                 time_bins = bin_by_time(events)
                 for ts, entries in time_bins.items():
                     # Filter events by type if specified
@@ -1572,6 +1728,12 @@ def process_subjects_chunk(subject_ids, args, process_id):
                         ]
                     else:
                         filtered_entries = entries
+
+                    # Filter events by code exclusion patterns
+                    if exclude_code_patterns:
+                        filtered_entries = [
+                            e for e in filtered_entries if not should_exclude_event(e)
+                        ]
 
                     # Skip entries that have no events after filtering
                     if not filtered_entries:
@@ -1603,6 +1765,9 @@ def process_subjects_chunk(subject_ids, args, process_id):
             # HACK apply fixes to XML elements
             root = fix_image_events(root)
 
+            # Remove elements with all null attributes
+            root = remove_null_elements(root)
+
             # Convert the root element to the desired format
             output = convert_func(root)
 
@@ -1613,7 +1778,9 @@ def process_subjects_chunk(subject_ids, args, process_id):
                 out_filename = os.path.join(
                     args.path_to_output, f"{subject_id}.{file_extension}"
                 )
-                with open(out_filename, "w", encoding="utf-8") as f:
+                with open(
+                    out_filename, "w", encoding="utf-8", errors="xmlcharrefreplace"
+                ) as f:
                     f.write(output)
 
             if args.test_mode and i > 20:
