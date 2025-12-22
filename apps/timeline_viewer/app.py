@@ -9,14 +9,14 @@ python apps/timeline_viewer/app.py \
 
 """
 
+import argparse
+import html
 import os
 import re
-import html
-import argparse
-import gradio as gr
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
+import gradio as gr
 
 # ── 0. Command-line args ──
 parser = argparse.ArgumentParser(description="Patient Timeline Viewer")
@@ -182,7 +182,7 @@ def render_html(
 
     html_out = ""
     for e in encs_to_render:
-        types_in = [LABEL_TO_TYPE[l] for l in emoji_labels]
+        types_in = [LABEL_TO_TYPE[label] for label in emoji_labels]
         filtered = []
         for entry in e["events"]:
             evs = []

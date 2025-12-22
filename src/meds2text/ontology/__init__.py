@@ -1,4 +1,4 @@
-from .athena import preprocess_csv, AthenaOntology
+from .athena import preprocess_csv
 from .core import OntologyDescriptionLookupTable
 
-__all__ = ["preprocess_csv", "Ontology", "OntologyDescriptionLookupTable"]
+__all__ = ["preprocess_csv", "OntologyDescriptionLookupTable"]

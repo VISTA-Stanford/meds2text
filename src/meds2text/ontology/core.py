@@ -1,9 +1,8 @@
-import marisa_trie
 import os
-import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
 from typing import Optional
+
+import marisa_trie
+import pyarrow.parquet as pq
 
 
 class OntologyDescriptionLookupTable:

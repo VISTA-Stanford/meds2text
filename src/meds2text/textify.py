@@ -107,25 +107,33 @@ python src/vista/meds_to_text_mp.py \
 
 import argparse
 import collections
-from datetime import datetime, timedelta
 import json
 import logging
 import multiprocessing
 import os
 import re
 import time
-from typing import Any, Dict, Optional, Set, List
 import xml.etree.ElementTree as ET
-
-from dateutil.relativedelta import relativedelta
-from lxml import etree
-from lxml.etree import Element, SubElement, tostring
-import pandas as pd
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Set
 
 import meds_reader
+import pandas as pd
+from dateutil.relativedelta import relativedelta
+from lxml.etree import Element, SubElement, tostring
 from meds_reader.transform import MutableEvent, MutableSubject
+
 from meds2text.ontology import OntologyDescriptionLookupTable
-from meds2text.transforms import *
+from meds2text.transforms import (
+    delta_encode,
+    is_visit_table,
+    move_billing_codes,
+    move_pre_birth,
+    move_to_day_end,
+    move_visit_start_to_first_event_start,
+    remove_nones,
+    switch_to_icd10cm,
+)
 
 
 def parse_args():
@@ -258,7 +266,7 @@ def omop_drop_orphan_events(
 def parse_flowsheet_event(event, subject_id=None):
     """
     Parse STANFORD_OBS/Flowsheet events with complex JSON structure.
-    
+
     Parses two JSON columns:
     1. text_value (value_as_string): Contains measurement data
        - ip_flwsht_meas.meas_value → text_value (the measurement)
@@ -268,12 +276,12 @@ def parse_flowsheet_event(event, subject_id=None):
        - ip_flt_data.display_name → group_name attribute
     """
     props = {}
-    
+
     # Get values from event - events support dict-like iteration
     event_dict = {k: v for k, v in event}
     text_value = event_dict.get("text_value")
     observation_source_value = event_dict.get("observation_source_value")
-    
+
     # Parse text_value JSON (value_as_string column)
     if text_value:
         try:
@@ -282,7 +290,7 @@ def parse_flowsheet_event(event, subject_id=None):
                 for item in value_json["values"]:
                     source = item.get("source", "")
                     val = item.get("value")
-                    
+
                     if source == "ip_flwsht_meas.meas_value":
                         # Measurement value becomes the text_value
                         props["text_value"] = str(val) if val is not None else None
@@ -291,13 +299,15 @@ def parse_flowsheet_event(event, subject_id=None):
                         props["name"] = str(val) if val is not None else None
                     elif source == "ip_flo_gp_data.units":
                         # Units become unit_source_value attribute
-                        props["unit_source_value"] = str(val) if val is not None else None
+                        props["unit_source_value"] = (
+                            str(val) if val is not None else None
+                        )
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(
                 f"Failed to parse flowsheet text_value JSON - person_id={subject_id}, "
                 f"error={str(e)}, text_value={str(text_value)[:200] if text_value else 'None'}"
             )
-    
+
     # Parse observation_source_value JSON (group/panel name)
     if observation_source_value:
         try:
@@ -306,7 +316,7 @@ def parse_flowsheet_event(event, subject_id=None):
                 for item in obs_json["values"]:
                     source = item.get("source", "")
                     val = item.get("value")
-                    
+
                     if source == "ip_flt_data.display_name":
                         # Panel/group name becomes group_name attribute
                         props["group_name"] = str(val) if val is not None else None
@@ -315,7 +325,7 @@ def parse_flowsheet_event(event, subject_id=None):
                 f"Failed to parse flowsheet observation_source_value JSON - person_id={subject_id}, "
                 f"error={str(e)}, observation_source_value={str(observation_source_value)[:200] if observation_source_value else 'None'}"
             )
-    
+
     return props
 
 
@@ -388,7 +398,7 @@ def import_flowsheet_events(
 ) -> meds_reader.transform.MutableSubject:
     """
     Apply modular event parsers to transform events based on their code.
-    
+
     Each event code can have a custom parser that extracts/transforms properties
     from JSON columns or other complex structures.
     """
@@ -396,7 +406,7 @@ def import_flowsheet_events(
     for event in subject.events:
         # Check if there's a parser for this event code
         parser = EVENT_PARSERS.get(event.code)
-        
+
         if parser:
             # Get existing properties (excluding time, code, and columns that will be parsed)
             # For flowsheet events, also exclude value_as_string
@@ -404,13 +414,13 @@ def import_flowsheet_events(
             if event.code == "STANFORD_OBS/Flowsheet":
                 exclude_keys = exclude_keys + ("value_as_string",)
             props = {k: v for k, v in event if k not in exclude_keys}
-            
+
             # Apply the parser to get updated properties
             parsed_props = parser(event, subject_id=subject.subject_id)
-            
+
             # Merge parsed properties into props (parsed props take precedence)
             props.update(parsed_props)
-            
+
             # Create new event with updated properties
             events.append(MutableEvent(event.time, event.code, props))
         else:
@@ -511,19 +521,21 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
       - care_site.csv or care_site.csv.gz
 
     """
-    
+
     def normalize_column_names(df):
         """Normalize column names to lowercase for case-insensitive matching"""
         df.columns = df.columns.str.lower()
         return df
-    
+
     def get_column_case_insensitive(df, col_name):
         """Get column data using case-insensitive matching"""
         col_name_lower = col_name.lower()
         if col_name_lower in df.columns:
             return df[col_name_lower]
         else:
-            raise KeyError(f"Column '{col_name}' not found in dataframe. Available columns: {list(df.columns)}")
+            raise KeyError(
+                f"Column '{col_name}' not found in dataframe. Available columns: {list(df.columns)}"
+            )
 
     def init_all_providers(metadata):
         """Requires provider and care_site tables"""
@@ -568,9 +580,7 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
         return metadata
 
     # providers
-    provider_map_df = read_metadata_file(
-        path_to_metadata, "provider", dtype=str
-    )
+    provider_map_df = read_metadata_file(path_to_metadata, "provider", dtype=str)
     provider_map_df = normalize_column_names(provider_map_df)
     provider_map_df = provider_map_df.fillna("")
     gender_col = get_column_case_insensitive(provider_map_df, "gender_concept_id")
@@ -578,49 +588,46 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
         {"8532": "FEMALE", "8507": "MALE", "0": ""}
     )
     # Ensure provider_id is string for consistent key matching
-    provider_id_col = get_column_case_insensitive(provider_map_df, "provider_id")
     provider_map = {
-        str(row.provider_id): row._asdict() 
-        for row in provider_map_df.itertuples()
+        str(row.provider_id): row._asdict() for row in provider_map_df.itertuples()
     }
 
     # payer plans
     # First read without parse_dates to handle case insensitive column names
-    payer_plan_df = read_metadata_file(
-        path_to_metadata,
-        "payer_plan_period"
-    )
+    payer_plan_df = read_metadata_file(path_to_metadata, "payer_plan_period")
     payer_plan_df = normalize_column_names(payer_plan_df)
-    
+
     # Parse dates with case-insensitive column names
     date_cols = []
     for col in ["payer_plan_period_start_date", "payer_plan_period_end_date"]:
         if col in payer_plan_df.columns:
             date_cols.append(col)
             payer_plan_df[col] = pd.to_datetime(payer_plan_df[col])
-    
+
     # Subset to only the relevant columns (case insensitive)
     required_cols = []
     col_mapping = {
         "person_id": "person_id",
-        "payer_plan_period_start_date": "payer_plan_period_start_date", 
+        "payer_plan_period_start_date": "payer_plan_period_start_date",
         "payer_plan_period_end_date": "payer_plan_period_end_date",
-        "payer_source_value": "payer_source_value"
+        "payer_source_value": "payer_source_value",
     }
-    
+
     for expected_col in col_mapping.keys():
         if expected_col in payer_plan_df.columns:
             required_cols.append(expected_col)
         else:
-            raise KeyError(f"Required column '{expected_col}' not found. Available columns: {list(payer_plan_df.columns)}")
-    
+            raise KeyError(
+                f"Required column '{expected_col}' not found. Available columns: {list(payer_plan_df.columns)}"
+            )
+
     payer_plan_df = payer_plan_df[required_cols]
     # Rename columns to standardized names
     column_rename_map = {
         "person_id": "person_id",
         "payer_plan_period_start_date": "start_date",
-        "payer_plan_period_end_date": "end_date", 
-        "payer_source_value": "payer_source_value"
+        "payer_plan_period_end_date": "end_date",
+        "payer_source_value": "payer_source_value",
     }
     payer_plan_df = payer_plan_df.rename(columns=column_rename_map)
 
@@ -629,9 +636,7 @@ def load_metadata(path_to_metadata: str) -> Dict[str, Any]:
         payer_plan_map[row.person_id].append(row._asdict())
 
     # care sites
-    care_site_df = read_metadata_file(
-        path_to_metadata, "care_site", dtype=str
-    )
+    care_site_df = read_metadata_file(path_to_metadata, "care_site", dtype=str)
     care_site_df = normalize_column_names(care_site_df)
     care_site_name_col = get_column_case_insensitive(care_site_df, "care_site_name")
     care_site_df["care_site_name"] = care_site_name_col.fillna("_")
@@ -1131,14 +1136,17 @@ def person_to_xml(person: Dict) -> Element:
 # Module-level variable for tracking current subject ID
 _current_subject_id = None
 
-def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_order: List[str] = None) -> str:
+
+def event_to_xml(
+    event, ontology, excluded_props: Set[str] = None, attribute_order: List[str] = None
+) -> str:
     """
     Convert an event to an XML element.
-    
+
     Note: excluded_props only affects which attributes appear in the XML output.
     All event properties remain available for internal processing (e.g., parsers can
     still access observation_source_value and value_as_string even if excluded).
-    
+
     Args:
         attribute_order: List of attribute names in desired order. Attributes not in this
                         list will be appended in their original order. Default: ["table", "code", "name"]
@@ -1154,12 +1162,8 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_ord
 
     # Build attributes dict - excluded_props filters what appears as XML attributes
     # but the original event still contains all properties for processing
-    attributes = {
-        key: value
-        for key, value in event
-        if key not in excluded_props
-    }
-    
+    attributes = {key: value for key, value in event if key not in excluded_props}
+
     # For flowsheet events, ensure we use the parsed text_value
     # Don't let it fall back to code or other values
     if event.code == "STANFORD_OBS/Flowsheet":
@@ -1178,7 +1182,7 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_ord
 
     # Use provided attribute_order or default
     # Attributes not in this list will be appended at the end in their original order
-    
+
     # Convert all attribute values to strings (XML requires string attributes)
     # Use 'attr_value' instead of 'value' to avoid shadowing the 'value' variable
     # Use "_" as sentinel for NULL values instead of "NULL"
@@ -1188,15 +1192,15 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_ord
         # Omit 'name' attribute if it's empty
         if not (key == "name" and (attr_value is None or attr_value == ""))
     }
-    
+
     # Create element first, then set attributes in desired order
     event_element = Element("event")
-    
+
     # Set attributes in preferred order first
     for key in attribute_order:
         if key in xml_attributes:
             event_element.set(key, xml_attributes[key])
-    
+
     # Set remaining attributes in their original order
     # Use 'attr_val' instead of 'value' to avoid shadowing the 'value' variable
     for key, attr_val in xml_attributes.items():
@@ -1411,20 +1415,25 @@ def process_subjects_chunk(subject_ids, args, process_id):
         excluded_props.add("care_site_name")
 
     # Set conversion function and file extension based on output format
+    def convert_lumia_json(root):
+        return json.dumps(xml_to_json(tostring(root)), indent=2)
+
+    def convert_lumia_xml(root):
+        return tostring(root, encoding="unicode", pretty_print=True)
+
+    def convert_fhir_like_json(root):
+        return json.dumps(xml_to_fhir_like(tostring(root)), indent=2)
+
     if args.format == "lumia_json":
-        convert_func = lambda root: json.dumps(xml_to_json(tostring(root)), indent=2)
+        convert_func = convert_lumia_json
         file_extension = "json"
     elif args.format == "lumia_xml":
-        convert_func = lambda root: tostring(
-            root, encoding="unicode", pretty_print=True
-        )
+        convert_func = convert_lumia_xml
         file_extension = "xml"
     elif args.format == "tabular":
         raise NotImplementedError("Tabular format not implemented")
     elif args.format == "fhir_like_json":
-        convert_func = lambda root: json.dumps(
-            xml_to_fhir_like(tostring(root)), indent=2
-        )
+        convert_func = convert_fhir_like_json
         file_extension = "fhir-like.json"
     else:
         raise ValueError(f"Invalid format: {args.format}")
@@ -1511,15 +1520,20 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     person = person_to_xml(person_values)
 
                     # Note: Missing providers are already tracked above when collecting provider_ids
-                    
+
                     care_sites.update(
                         metadata["provider"][p]["care_site_id"]
                         for p in providers
-                        if p in metadata["provider"] and metadata["provider"][p].get("care_site_id")
+                        if p in metadata["provider"]
+                        and metadata["provider"][p].get("care_site_id")
                     )
 
                     providers_xml = dict_to_xml(
-                        [metadata["provider"][p] for p in providers if p in metadata["provider"]],
+                        [
+                            metadata["provider"][p]
+                            for p in providers
+                            if p in metadata["provider"]
+                        ],
                         "providers",
                         "provider",
                         excluded_props,
@@ -1566,7 +1580,9 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     entry = {
                         "timestamp": ts,
                         "events": [
-                            event_to_xml(e, ontology, excluded_props, args.attribute_order)
+                            event_to_xml(
+                                e, ontology, excluded_props, args.attribute_order
+                            )
                             for e in filtered_entries
                         ],
                     }
@@ -1602,11 +1618,13 @@ def process_subjects_chunk(subject_ids, args, process_id):
 
             if args.test_mode and i > 20:
                 break
-        
+
         # Log summary statistics for missing provider_ids and care_site_ids
         total_provider_ids = len(all_provider_ids_seen)
         if total_provider_ids > 0:
-            missing_provider_pct = (len(missing_provider_ids) / total_provider_ids) * 100
+            missing_provider_pct = (
+                len(missing_provider_ids) / total_provider_ids
+            ) * 100
             logger.info(
                 f"Process {process_id}: Missing provider_ids: {len(missing_provider_ids)}/{total_provider_ids} "
                 f"({missing_provider_pct:.2f}%)"
@@ -1617,10 +1635,12 @@ def process_subjects_chunk(subject_ids, args, process_id):
                 )
         else:
             logger.info(f"Process {process_id}: No provider_ids encountered")
-        
+
         total_care_site_ids = len(all_care_site_ids_seen)
         if total_care_site_ids > 0:
-            missing_care_site_pct = (len(missing_care_site_ids) / total_care_site_ids) * 100
+            missing_care_site_pct = (
+                len(missing_care_site_ids) / total_care_site_ids
+            ) * 100
             logger.info(
                 f"Process {process_id}: Missing care_site_ids: {len(missing_care_site_ids)}/{total_care_site_ids} "
                 f"({missing_care_site_pct:.2f}%)"

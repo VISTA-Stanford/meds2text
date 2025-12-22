@@ -27,9 +27,11 @@ python scripts/init_athena_ontologies.py \
 import argparse
 import random
 import time
+
 import pandas as pd
-from meds2text.ontology.athena import AthenaOntology
+
 from meds2text.ontology import OntologyDescriptionLookupTable
+from meds2text.ontology.athena import AthenaOntology
 
 
 def parse_args():

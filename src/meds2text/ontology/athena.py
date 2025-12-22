@@ -1,13 +1,13 @@
-import os
 import collections
-import zipfile
 import io
-import numpy as np
+import os
+import zipfile
+from typing import Any, Dict, Optional, Set
+
+import networkx as nx
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
-import networkx as nx
-from typing import Dict, Optional, Iterable, Set, Type, Any, Union
 
 
 # Utility to preprocess Athena CSV files
@@ -142,7 +142,7 @@ def hierarchy_pos(G, root, levels=None, width=2.0, height=1.0):
 
     def make_levels(levels, node=root, currentLevel=0, parent=None):
         """Compute the number of nodes for each level"""
-        if not currentLevel in levels:
+        if currentLevel not in levels:
             levels[currentLevel] = {TOTAL: 0, CURRENT: 0}
         levels[currentLevel][TOTAL] += 1
         neighbors = G.neighbors(node)
@@ -188,8 +188,8 @@ def hierarchy_pos(G, root, levels=None, width=2.0, height=1.0):
     if levels is None:
         levels = make_levels({})
     else:
-        levels = {l: {TOTAL: levels[l], CURRENT: 0} for l in levels}
-    vert_gap = height / (max([l for l in levels]) + 1)
+        levels = {level: {TOTAL: levels[level], CURRENT: 0} for level in levels}
+    vert_gap = height / (max([level for level in levels]) + 1)
     return make_pos({})
 
 
@@ -590,8 +590,8 @@ class AthenaOntology:
             pdf_filename: Optional filename for the PDF (default: auto-generated)
         """
         try:
-            import matplotlib.pyplot as plt
             import matplotlib.patches as mpatches
+            import matplotlib.pyplot as plt
         except ImportError:
             raise ImportError(
                 "matplotlib is required for visualization. Install with: pip install matplotlib"

@@ -6,12 +6,12 @@ FEMR library here: https://github.com/som-shahlab/femr/blob/main/src/femr/transf
 
 """
 
-import datetime
 import argparse
+import datetime
 import functools
 import json
 import os
-from typing import Dict, Tuple, Callable, Sequence, Optional, Any, List, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import meds
 import meds_reader
@@ -115,7 +115,7 @@ def delta_encode(
 
 def is_visit_table(table_name: str) -> bool:
     """Check if a table name represents a visit table.
-    
+
     Handles both short form (visit) and long form (visit_occurrence) table names.
     """
     return table_name in ("visit", "visit_occurrence")

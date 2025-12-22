@@ -1,10 +1,10 @@
-import pytest
-from meds2text.ontology.athena import AthenaOntology
 import matplotlib
+import pytest
+
+from meds2text.ontology.athena import AthenaOntology
 
 matplotlib.use("Agg")
 from unittest.mock import patch
-import networkx as nx
 
 # Test data
 SAMPLE_DESCRIPTIONS = {
