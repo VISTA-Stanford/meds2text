@@ -187,6 +187,12 @@ def parse_args():
         default=["*"],
         help="List of event types to include, or '*' for all types (default: *)",
     )
+    parser.add_argument(
+        "--attribute_order",
+        nargs="+",
+        default=None,
+        help="Order of XML attributes (default: table, code, name). Attributes not listed will be appended in their original order.",
+    )
     args = parser.parse_args()
     return args
 
@@ -263,25 +269,10 @@ def parse_flowsheet_event(event, subject_id=None):
     """
     props = {}
     
-    # Initialize debug counter
-    global _flowsheet_debug_count
-    if not hasattr(parse_flowsheet_event, '_debug_count'):
-        parse_flowsheet_event._debug_count = 0
-    parse_flowsheet_event._debug_count += 1
-    debug_count = parse_flowsheet_event._debug_count
-    
     # Get values from event - events support dict-like iteration
     event_dict = {k: v for k, v in event}
     text_value = event_dict.get("text_value")
     observation_source_value = event_dict.get("observation_source_value")
-    
-    # Detailed debugging for specific person_id
-    DEBUG_PERSON_ID = "135915351"
-    if str(subject_id) == DEBUG_PERSON_ID:
-        print(f"\n[FLOWSHEET DETAILED DEBUG] person_id={subject_id}")
-        print(f"  Raw text_value JSON: {text_value}")
-        print(f"  Raw observation_source_value JSON: {observation_source_value}")
-        print(f"  Full event_dict keys: {list(event_dict.keys())}")
     
     # Parse text_value JSON (value_as_string column)
     if text_value:
@@ -301,29 +292,10 @@ def parse_flowsheet_event(event, subject_id=None):
                     elif source == "ip_flo_gp_data.units":
                         # Units become unit_source_value attribute
                         props["unit_source_value"] = str(val) if val is not None else None
-                
-                # Debug: if we didn't find expected values, log the structure
-                if debug_count <= 5 and not props.get("text_value"):
-                    print(
-                        f"[FLOWSHEET PARSER WARNING] person_id={subject_id}, "
-                        f"No meas_value found. Available sources: {[item.get('source') for item in value_json.get('values', [])]}"
-                    )
-            else:
-                if debug_count <= 5:
-                    print(
-                        f"[FLOWSHEET PARSER WARNING] person_id={subject_id}, "
-                        f"JSON missing 'values' key. Keys: {list(value_json.keys()) if isinstance(value_json, dict) else 'not a dict'}"
-                    )
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(
                 f"Failed to parse flowsheet text_value JSON - person_id={subject_id}, "
                 f"error={str(e)}, text_value={str(text_value)[:200] if text_value else 'None'}"
-            )
-    else:
-        if debug_count <= 5:
-            print(
-                f"[FLOWSHEET PARSER WARNING] person_id={subject_id}, "
-                f"text_value is None or empty"
             )
     
     # Parse observation_source_value JSON (group/panel name)
@@ -343,25 +315,6 @@ def parse_flowsheet_event(event, subject_id=None):
                 f"Failed to parse flowsheet observation_source_value JSON - person_id={subject_id}, "
                 f"error={str(e)}, observation_source_value={str(observation_source_value)[:200] if observation_source_value else 'None'}"
             )
-    
-    # Debug logging for first few flowsheet events
-    if debug_count <= 5:
-        print(
-            f"[FLOWSHEET PARSER DEBUG #{debug_count}] person_id={subject_id}, "
-            f"name={props.get('name')}, "
-            f"text_value={props.get('text_value')}, "
-            f"unit_source_value={props.get('unit_source_value')}, "
-            f"group_name={props.get('group_name')}"
-        )
-    
-    # Detailed debugging for specific person_id
-    DEBUG_PERSON_ID = "135915351"
-    if str(subject_id) == DEBUG_PERSON_ID:
-        print(f"[FLOWSHEET PARSER RESULT] person_id={subject_id}")
-        print(f"  Parsed props dictionary: {props}")
-        print(f"  All props keys: {list(props.keys())}")
-        print(f"  text_value in props: {props.get('text_value')}")
-        print(f"  text_value type: {type(props.get('text_value'))}")
     
     return props
 
@@ -1175,20 +1128,25 @@ def person_to_xml(person: Dict) -> Element:
     return person_elem
 
 
-# Module-level variables for debug logging
-_flowsheet_debug_count = 0
+# Module-level variable for tracking current subject ID
 _current_subject_id = None
 
-def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
+def event_to_xml(event, ontology, excluded_props: Set[str] = None, attribute_order: List[str] = None) -> str:
     """
     Convert an event to an XML element.
     
     Note: excluded_props only affects which attributes appear in the XML output.
     All event properties remain available for internal processing (e.g., parsers can
     still access observation_source_value and value_as_string even if excluded).
+    
+    Args:
+        attribute_order: List of attribute names in desired order. Attributes not in this
+                        list will be appended in their original order. Default: ["table", "code", "name"]
     """
-    global _flowsheet_debug_count, _current_subject_id
+    global _current_subject_id
     excluded_props = excluded_props or set()
+    if attribute_order is None:
+        attribute_order = ["table", "code", "name"]
 
     # code description / name
     if event.code != "STANFORD_OBS/Flowsheet":
@@ -1202,16 +1160,6 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
         if key not in excluded_props
     }
     
-    # Detailed debugging for specific person_id
-    DEBUG_PERSON_ID = "135915351"
-    if event.code == "STANFORD_OBS/Flowsheet" and str(_current_subject_id) == DEBUG_PERSON_ID:
-        print(f"\n[FLOWSHEET XML DETAILED DEBUG] person_id={_current_subject_id}")
-        print(f"  All attributes keys: {list(attributes.keys())}")
-        print(f"  Full attributes dict: {attributes}")
-        print(f"  text_value in attributes: {attributes.get('text_value')}")
-        print(f"  text_value type: {type(attributes.get('text_value'))}")
-        print(f"  excluded_props: {excluded_props}")
-    
     # For flowsheet events, ensure we use the parsed text_value
     # Don't let it fall back to code or other values
     if event.code == "STANFORD_OBS/Flowsheet":
@@ -1219,26 +1167,8 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
         # If text_value is None or empty, keep it as None (don't use code)
         if value == "" or value == "NULL":
             value = None
-        
-        # Detailed debugging for specific person_id
-        if str(_current_subject_id) == DEBUG_PERSON_ID:
-            print(f"  After extraction - value={value}, type={type(value)}")
     else:
         value = attributes.get("numeric_value") or attributes.get("text_value") or None
-    
-    # Debug logging for flowsheet events - print first few examples
-    if event.code == "STANFORD_OBS/Flowsheet":
-        _flowsheet_debug_count += 1
-        if _flowsheet_debug_count <= 5:
-            person_id_str = f"person_id={_current_subject_id}" if _current_subject_id else "person_id=unknown"
-            print(
-                f"[FLOWSHEET XML DEBUG #{_flowsheet_debug_count}] {person_id_str}, "
-                f"code={event.code}, "
-                f"text_value from attributes={attributes.get('text_value')}, "
-                f"numeric_value={attributes.get('numeric_value')}, "
-                f"final value={value}, "
-                f"name={attributes.get('name')}"
-            )
 
     # cleanup keynames
     if "name" not in attributes:
@@ -1246,9 +1176,8 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
     attributes.pop("numeric_value", None)
     attributes.pop("text_value", None)
 
-    # Define attribute order preference (most important first)
+    # Use provided attribute_order or default
     # Attributes not in this list will be appended at the end in their original order
-    attribute_order = ["table", "code", "name"]
     
     # Convert all attribute values to strings (XML requires string attributes)
     # Use 'attr_value' instead of 'value' to avoid shadowing the 'value' variable
@@ -1288,12 +1217,6 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
             )
         )
     )
-    
-    # Detailed debugging for specific person_id
-    DEBUG_PERSON_ID = "135915351"
-    if event.code == "STANFORD_OBS/Flowsheet" and str(_current_subject_id) == DEBUG_PERSON_ID:
-        print(f"  After setting element.text: {event_element.text}")
-        print(f"  value used: {value}, type: {type(value)}")
 
     # some text values are mappings to concepts, e.g., OMOP_CONCEPT_ID/{concept_id}
     # BUT: Don't override flowsheet values - they are already parsed measurements
@@ -1301,16 +1224,6 @@ def event_to_xml(event, ontology, excluded_props: Set[str] = None) -> str:
         code_value_description = ontology.get_description(str(value))
         if code_value_description:
             event_element.text = code_value_description
-    
-    # Final detailed debugging for specific person_id
-    if event.code == "STANFORD_OBS/Flowsheet" and str(_current_subject_id) == DEBUG_PERSON_ID:
-        print(f"  Final element.text after ontology check: {event_element.text}")
-        print(f"  Final XML element attributes: {dict(event_element.attrib)}")
-        try:
-            xml_str = tostring(event_element, encoding='unicode')
-            print(f"  Final XML element (as string): {xml_str[:500]}\n")
-        except:
-            print(f"  Could not convert to string\n")
 
     return event_element
 
@@ -1653,7 +1566,7 @@ def process_subjects_chunk(subject_ids, args, process_id):
                     entry = {
                         "timestamp": ts,
                         "events": [
-                            event_to_xml(e, ontology, excluded_props)
+                            event_to_xml(e, ontology, excluded_props, args.attribute_order)
                             for e in filtered_entries
                         ],
                     }
