@@ -125,6 +125,12 @@ from lxml.etree import Element, SubElement, tostring
 from meds_reader.transform import MutableEvent, MutableSubject
 
 from meds2text.ontology import OntologyDescriptionLookupTable
+from meds2text.parquet_streaming import (
+    collect_subject_ids_from_shards,
+    discover_parquet_shards,
+    iter_subjects_from_parquet_files,
+    partition_shards_across_workers,
+)
 from meds2text.transforms import (
     delta_encode,
     is_visit_table,
@@ -136,9 +142,18 @@ from meds2text.transforms import (
     switch_to_icd10cm,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert MEDS to text")
+    parser.add_argument(
+        "--meds_backend",
+        type=str,
+        default="reader",
+        choices=["reader", "parquet"],
+        help="reader: meds_reader indexed database; parquet: raw MEDS Parquet under data/**/*.parquet",
+    )
     parser.add_argument("--path_to_meds", type=str, help="")
     parser.add_argument("--path_to_output", type=str, help="")
     parser.add_argument(
@@ -499,6 +514,43 @@ def apply_transforms(subject, *, transforms):
     return subject
 
 
+def _subject_transform_chain():
+    return (
+        to_mutable_subject,
+        delta_encode,
+        omop_drop_orphan_events,
+        import_flowsheet_events,
+        move_billing_codes,
+        move_to_day_end,
+        move_visit_start_to_first_event_start,
+        remove_nones,
+        switch_to_icd10cm,
+        omop_split_interval_events,
+        move_pre_birth,
+    )
+
+
+def subject_transforms_for_reader():
+    return list(_subject_transform_chain())
+
+
+def subject_transforms_for_parquet():
+    return list(_subject_transform_chain())[1:]
+
+
+def prepare_subject_pipeline(subject, args, *, already_mutable: bool):
+    if args.apply_transforms:
+        transforms = (
+            subject_transforms_for_parquet()
+            if already_mutable
+            else subject_transforms_for_reader()
+        )
+        return apply_transforms(subject, transforms=transforms)
+    if already_mutable:
+        return subject
+    return to_mutable_subject(subject)
+
+
 #
 # Data Dependency Loaders
 #
@@ -773,7 +825,6 @@ def bin_events(intervals, events, excluded_tables=None):
 
 
 def is_non_overlapping(intervals):
-
     # First, sort the intervals by their start time.
     sorted_intervals = sorted(intervals, key=lambda iv: iv[0])
 
@@ -1499,45 +1550,101 @@ def load_and_validate_person_ids(person_ids_file: str, database) -> List[int]:
     return valid_person_ids
 
 
+def load_and_validate_person_ids_parquet(
+    person_ids_file: str, shard_paths: List[str]
+) -> List[int]:
+    """
+    Like load_and_validate_person_ids but resolves available IDs by scanning
+    subject_id columns across Parquet shards (no meds_reader database).
+    """
+    if not os.path.exists(person_ids_file):
+        raise FileNotFoundError(f"Person IDs file not found: {person_ids_file}")
+
+    if person_ids_file.lower().endswith(".tsv"):
+        separator = "\t"
+    elif person_ids_file.lower().endswith(".csv"):
+        separator = ","
+    else:
+        with open(person_ids_file, "r") as f:
+            first_line = f.readline().strip()
+            separator = "\t" if "\t" in first_line else ","
+
+    try:
+        df = pd.read_csv(person_ids_file, sep=separator)
+    except Exception as e:
+        raise ValueError(f"Error reading file {person_ids_file}: {e}")
+
+    if "person_id" not in df.columns:
+        raise ValueError(
+            f"'person_id' column not found in {person_ids_file}. Available columns: {list(df.columns)}"
+        )
+
+    person_ids = df["person_id"].astype(str).dropna().tolist()
+
+    if not person_ids:
+        raise ValueError(
+            f"No person IDs found in 'person_id' column of {person_ids_file}"
+        )
+
+    available_subject_ids = collect_subject_ids_from_shards(shard_paths)
+    available_str = {str(sid) for sid in available_subject_ids}
+
+    valid_person_ids = []
+    missing_person_ids = []
+
+    for person_id in person_ids:
+        if person_id in available_str:
+            valid_person_ids.append(int(person_id))
+        else:
+            missing_person_ids.append(person_id)
+
+    logger.info(f"Loaded {len(person_ids)} person IDs from {person_ids_file}")
+    logger.info(
+        f"Found {len(valid_person_ids)} valid person IDs in Parquet shards "
+        f"({len(shard_paths)} files)"
+    )
+
+    if missing_person_ids:
+        logger.warning(
+            f"Missing {len(missing_person_ids)} person IDs from Parquet data: {missing_person_ids[:10]}{'...' if len(missing_person_ids) > 10 else ''}"
+        )
+
+    if not valid_person_ids:
+        raise ValueError("No valid person IDs found in Parquet shards")
+
+    return valid_person_ids
+
+
 #######################
 
 
-def process_subjects_chunk(subject_ids, args, process_id):
-    """
-    Process a chunk of subject IDs in a separate process.
-    Each process loads its own copy of the ontology, metadata, and database.
-    In batch mode, the process writes out its own TSV file with a process-specific prefix.
-    """
-    # Load shared resources
-    ontology = load_ontology(args.path_to_ontology)
-    metadata = load_metadata(args.path_to_metadata)
-    database = meds_reader.SubjectDatabase(args.path_to_meds)
+def process_one_subject(
+    subject_id: int,
+    subject_raw,
+    *,
+    args,
+    ontology,
+    metadata,
+    already_mutable: bool,
+    convert_func,
+    file_extension: str,
+    batch_file,
+    process_id: int,
+    all_provider_ids_seen: Set[str],
+    missing_provider_ids: Set[str],
+    all_care_site_ids_seen: Set[str],
+    missing_care_site_ids: Set[str],
+):
+    """Shared per-subject pipeline for meds_reader and raw Parquet backends."""
+    global _current_subject_id
+    _current_subject_id = subject_id
 
-    # Track missing provider_ids and care_site_ids for logging
-    all_provider_ids_seen = set()
-    missing_provider_ids = set()
-    all_care_site_ids_seen = set()
-    missing_care_site_ids = set()
+    subject = prepare_subject_pipeline(
+        subject_raw, args, already_mutable=already_mutable
+    )
 
-    # Transformation stack
-    transforms = [
-        to_mutable_subject,
-        delta_encode,
-        omop_drop_orphan_events,
-        import_flowsheet_events,
-        move_billing_codes,
-        move_to_day_end,
-        move_visit_start_to_first_event_start,
-        remove_nones,
-        switch_to_icd10cm,
-        omop_split_interval_events,
-        move_pre_birth,
-    ]
-
-    # some properties and tables we always exclude
-    # additional exclusion props are configurable via the command line
     excluded_tables = {"person"}
-    excluded_props = {
+    excluded_props: Set[str] = {
         "time",
         "end",
         "subject_id",
@@ -1545,18 +1652,181 @@ def process_subjects_chunk(subject_ids, args, process_id):
     if args.exclude_props:
         excluded_props.update(args.exclude_props)
 
-    if "providers" not in args.include_contexts:
+    contexts = args.include_contexts or []
+    if "providers" not in contexts:
         excluded_props.add("provider_id")
-    if "care_sites" not in args.include_contexts:
+    if "care_sites" not in contexts:
         excluded_props.add("care_site_id")
         excluded_props.add("care_site_name")
 
-    # Set conversion function and file extension based on output format
+    timestamps = [
+        (event.time, event.visit_id)
+        for event in subject.events
+        if event.table not in excluded_tables
+    ]
+
+    person_values = get_person_values(subject, ontology, excluded_props)
+    groups = fuzzy_partition(
+        timestamps, max_mismatches=1, max_timedelta=timedelta(hours=24)
+    )
+    intervals = [
+        (min(times), max(times)) for times, _ in (zip(*group) for group in groups)
+    ]
+
+    if not is_non_overlapping(intervals):
+        print("Warning, intervals overlap")
+
+    intervals = bin_events(intervals, subject.events, excluded_tables=excluded_tables)
+
+    data = {"encounters": []}
+    batch_mode = getattr(args, "batch_mode", False)
+
+    for (start, end), events in intervals.items():
+        encounter = {"events": [], "metadata": []}
+
+        if contexts:
+            care_sites, providers = set(), set()
+            for event in events:
+                provider_id = getattr(event, "provider_id", None)
+                care_site_id = getattr(event, "care_site_id", None)
+                if provider_id is not None:
+                    provider_id_str = str(provider_id)
+                    providers.add(provider_id_str)
+                    all_provider_ids_seen.add(provider_id_str)
+                    if provider_id_str not in metadata["provider"]:
+                        missing_provider_ids.add(provider_id_str)
+                if care_site_id is not None:
+                    care_site_id_str = str(care_site_id)
+                    care_sites.add(care_site_id_str)
+                    all_care_site_ids_seen.add(care_site_id_str)
+                    if care_site_id_str not in metadata["care_site"]:
+                        missing_care_site_ids.add(care_site_id_str)
+
+            payer_plan = (
+                get_payer_plan_coverage(subject_id, start, metadata["payer_plan"]) or ""
+            )
+            age = calculate_age(person_values["birth"], start)
+            person_values.update(
+                {
+                    "payer_plan": payer_plan,
+                    "age_in_years": age["age_in_years"],
+                    "age_in_days": age["age_in_days"],
+                }
+            )
+            person = person_to_xml(person_values)
+
+            care_sites.update(
+                metadata["provider"][p]["care_site_id"]
+                for p in providers
+                if p in metadata["provider"]
+                and metadata["provider"][p].get("care_site_id")
+            )
+
+            providers_xml = dict_to_xml(
+                [
+                    metadata["provider"][p]
+                    for p in providers
+                    if p in metadata["provider"]
+                ],
+                "providers",
+                "provider",
+                excluded_props=None,
+            )
+            care_sites_xml = dict_to_xml(
+                [
+                    {
+                        "care_site_id": cs,
+                        "care_site_name": metadata["care_site"].get(cs, "_"),
+                    }
+                    for cs in care_sites
+                    if cs in metadata["care_site"]
+                ],
+                "caresites",
+                "caresite",
+                excluded_props=None,
+            )
+            if "person" in contexts:
+                encounter["metadata"].append(person)
+            if "care_sites" in contexts:
+                encounter["metadata"].append(care_sites_xml)
+            if "providers" in contexts:
+                encounter["metadata"].append(providers_xml)
+
+        if args.event_types == ["*"]:
+            allowed_event_types = None
+        else:
+            allowed_event_types = set(args.event_types)
+
+        exclude_code_patterns = args.exclude_codes if args.exclude_codes else []
+
+        def should_exclude_event(event):
+            if not exclude_code_patterns:
+                return False
+            event_code = str(event.code) if hasattr(event, "code") else ""
+            for pattern in exclude_code_patterns:
+                if fnmatch.fnmatch(event_code, pattern):
+                    return True
+            return False
+
+        time_bins = bin_by_time(events)
+        for ts, entries in time_bins.items():
+            if allowed_event_types is not None:
+                filtered_entries = [
+                    e for e in entries if e.table in allowed_event_types
+                ]
+            else:
+                filtered_entries = entries
+
+            if exclude_code_patterns:
+                filtered_entries = [
+                    e for e in filtered_entries if not should_exclude_event(e)
+                ]
+
+            if not filtered_entries:
+                continue
+
+            entry = {
+                "timestamp": ts,
+                "events": [
+                    event_to_xml(e, ontology, excluded_props, args.attribute_order)
+                    for e in filtered_entries
+                ],
+            }
+            encounter["events"].append(entry_to_xml(entry))
+
+        enc_elem = Element("encounter")
+        for elem in encounter["metadata"]:
+            enc_elem.append(elem)
+        events_elem = SubElement(enc_elem, "events")
+        for entry in encounter["events"]:
+            events_elem.append(entry)
+        data["encounters"].append(enc_elem)
+
+    root = Element("eventstream", person_id=str(subject_id))
+    for enc in data["encounters"]:
+        root.append(enc)
+
+    root = fix_image_events(root)
+    root = remove_null_elements(root)
+
+    output = convert_func(root)
+
+    if batch_mode:
+        record = json.dumps({"subject_id": subject_id, "output": output})
+        batch_file.write(record + "\n")
+    else:
+        out_filename = os.path.join(
+            args.path_to_output, f"{subject_id}.{file_extension}"
+        )
+        with open(out_filename, "w", encoding="utf-8", errors="xmlcharrefreplace") as f:
+            f.write(output)
+
+
+def _conversion_setup(args):
     def convert_lumia_json(root):
         return json.dumps(xml_to_json(tostring(root)), indent=2)
 
     def convert_lumia_xml(root):
-        # Generate XML with UTF-8 encoding declaration
         xml_bytes = tostring(
             root, encoding="utf-8", pretty_print=True, xml_declaration=True
         )
@@ -1566,258 +1836,166 @@ def process_subjects_chunk(subject_ids, args, process_id):
         return json.dumps(xml_to_fhir_like(tostring(root)), indent=2)
 
     if args.format == "lumia_json":
-        convert_func = convert_lumia_json
-        file_extension = "json"
-    elif args.format == "lumia_xml":
-        convert_func = convert_lumia_xml
-        file_extension = "xml"
-    elif args.format == "tabular":
+        return convert_lumia_json, "json"
+    if args.format == "lumia_xml":
+        return convert_lumia_xml, "xml"
+    if args.format == "tabular":
         raise NotImplementedError("Tabular format not implemented")
-    elif args.format == "fhir_like_json":
-        convert_func = convert_fhir_like_json
-        file_extension = "fhir-like.json"
-    else:
-        raise ValueError(f"Invalid format: {args.format}")
+    if args.format == "fhir_like_json":
+        return convert_fhir_like_json, "fhir-like.json"
+    raise ValueError(f"Invalid format: {args.format}")
 
+
+def process_subjects_chunk(subject_ids, args, process_id):
+    """
+    Process a chunk of subject IDs in a separate process.
+    Each process loads its own copy of the ontology, metadata, and database.
+    In batch mode, the process writes out its own TSV file with a process-specific prefix.
+    """
+    ontology = load_ontology(args.path_to_ontology)
+    metadata = load_metadata(args.path_to_metadata)
+    database = meds_reader.SubjectDatabase(args.path_to_meds)
+
+    all_provider_ids_seen = set()
+    missing_provider_ids = set()
+    all_care_site_ids_seen = set()
+    missing_care_site_ids = set()
+
+    convert_func, file_extension = _conversion_setup(args)
     batch_mode = getattr(args, "batch_mode", False)
 
-    # Prepare batch output file stream
     if batch_mode:
         batch_filename = os.path.join(args.path_to_output, f"batch_{process_id}.jsonl")
-        batch_file = open(
-            batch_filename, "a", buffering=1, encoding="utf-8"
-        )  # Line-buffered
+        batch_file = open(batch_filename, "a", buffering=1, encoding="utf-8")
     else:
         batch_file = None
 
     try:
         for i, subject_id in enumerate(subject_ids):
-            # Set current subject_id for debug logging
-            global _current_subject_id
-            _current_subject_id = subject_id
             subject = database[subject_id]
-            if args.apply_transforms:
-                subject = apply_transforms(subject, transforms=transforms)
-
-            timestamps = [
-                (event.time, event.visit_id)
-                for event in subject.events
-                if event.table not in excluded_tables
-            ]
-
-            person_values = get_person_values(subject, ontology, excluded_props)
-            groups = fuzzy_partition(
-                timestamps, max_mismatches=1, max_timedelta=timedelta(hours=24)
+            process_one_subject(
+                subject_id,
+                subject,
+                args=args,
+                ontology=ontology,
+                metadata=metadata,
+                already_mutable=False,
+                convert_func=convert_func,
+                file_extension=file_extension,
+                batch_file=batch_file,
+                process_id=process_id,
+                all_provider_ids_seen=all_provider_ids_seen,
+                missing_provider_ids=missing_provider_ids,
+                all_care_site_ids_seen=all_care_site_ids_seen,
+                missing_care_site_ids=missing_care_site_ids,
             )
-            intervals = [
-                (min(times), max(times))
-                for times, _ in (zip(*group) for group in groups)
-            ]
-
-            if not is_non_overlapping(intervals):
-                print("Warning, intervals overlap")
-
-            intervals = bin_events(
-                intervals, subject.events, excluded_tables=excluded_tables
-            )
-
-            data = {"encounters": []}
-            for (start, end), events in intervals.items():
-                encounter = {"events": [], "metadata": []}
-
-                if args.include_contexts:
-                    care_sites, providers = set(), set()
-                    for event in events:
-                        provider_id = getattr(event, "provider_id", None)
-                        care_site_id = getattr(event, "care_site_id", None)
-                        # Convert to string to match metadata keys (loaded with dtype=str)
-                        if provider_id is not None:
-                            provider_id_str = str(provider_id)
-                            providers.add(provider_id_str)
-                            all_provider_ids_seen.add(provider_id_str)
-                            if provider_id_str not in metadata["provider"]:
-                                missing_provider_ids.add(provider_id_str)
-                        if care_site_id is not None:
-                            care_site_id_str = str(care_site_id)
-                            care_sites.add(care_site_id_str)
-                            all_care_site_ids_seen.add(care_site_id_str)
-                            if care_site_id_str not in metadata["care_site"]:
-                                missing_care_site_ids.add(care_site_id_str)
-
-                    payer_plan = (
-                        get_payer_plan_coverage(
-                            subject_id, start, metadata["payer_plan"]
-                        )
-                        or ""
-                    )
-                    age = calculate_age(person_values["birth"], start)
-                    person_values.update(
-                        {
-                            "payer_plan": payer_plan,
-                            "age_in_years": age["age_in_years"],
-                            "age_in_days": age["age_in_days"],
-                        }
-                    )
-                    person = person_to_xml(person_values)
-
-                    # Note: Missing providers are already tracked above when collecting provider_ids
-
-                    care_sites.update(
-                        metadata["provider"][p]["care_site_id"]
-                        for p in providers
-                        if p in metadata["provider"]
-                        and metadata["provider"][p].get("care_site_id")
-                    )
-
-                    providers_xml = dict_to_xml(
-                        [
-                            metadata["provider"][p]
-                            for p in providers
-                            if p in metadata["provider"]
-                        ],
-                        "providers",
-                        "provider",
-                        excluded_props=None,  # excluded_props only applies to events, not providers
-                    )
-                    care_sites_xml = dict_to_xml(
-                        [
-                            {
-                                "care_site_id": cs,
-                                "care_site_name": metadata["care_site"].get(cs, "_"),
-                            }
-                            for cs in care_sites
-                            if cs in metadata["care_site"]
-                        ],
-                        "caresites",
-                        "caresite",
-                        excluded_props=None,  # excluded_props only applies to events, not care_sites
-                    )
-                    if "person" in args.include_contexts:
-                        encounter["metadata"].append(person)
-                    if "care_sites" in args.include_contexts:
-                        encounter["metadata"].append(care_sites_xml)
-                    if "providers" in args.include_contexts:
-                        encounter["metadata"].append(providers_xml)
-
-                # Parse event type filter
-                if args.event_types == ["*"]:
-                    allowed_event_types = None  # Include all types
-                else:
-                    allowed_event_types = set(args.event_types)
-
-                # Parse code exclusion patterns
-                exclude_code_patterns = args.exclude_codes if args.exclude_codes else []
-
-                def should_exclude_event(event):
-                    """Check if an event should be excluded based on code patterns."""
-                    if not exclude_code_patterns:
-                        return False
-                    event_code = str(event.code) if hasattr(event, "code") else ""
-                    # Check if event code matches any exclusion pattern
-                    for pattern in exclude_code_patterns:
-                        if fnmatch.fnmatch(event_code, pattern):
-                            return True
-                    return False
-
-                time_bins = bin_by_time(events)
-                for ts, entries in time_bins.items():
-                    # Filter events by type if specified
-                    if allowed_event_types is not None:
-                        filtered_entries = [
-                            e for e in entries if e.table in allowed_event_types
-                        ]
-                    else:
-                        filtered_entries = entries
-
-                    # Filter events by code exclusion patterns
-                    if exclude_code_patterns:
-                        filtered_entries = [
-                            e for e in filtered_entries if not should_exclude_event(e)
-                        ]
-
-                    # Skip entries that have no events after filtering
-                    if not filtered_entries:
-                        continue
-
-                    entry = {
-                        "timestamp": ts,
-                        "events": [
-                            event_to_xml(
-                                e, ontology, excluded_props, args.attribute_order
-                            )
-                            for e in filtered_entries
-                        ],
-                    }
-                    encounter["events"].append(entry_to_xml(entry))
-
-                enc_elem = Element("encounter")
-                for elem in encounter["metadata"]:
-                    enc_elem.append(elem)
-                events_elem = SubElement(enc_elem, "events")
-                for entry in encounter["events"]:
-                    events_elem.append(entry)
-                data["encounters"].append(enc_elem)
-
-            root = Element("eventstream", person_id=str(subject_id))
-            for enc in data["encounters"]:
-                root.append(enc)
-
-            # HACK apply fixes to XML elements
-            root = fix_image_events(root)
-
-            # Remove elements with all null attributes
-            root = remove_null_elements(root)
-
-            # Convert the root element to the desired format
-            output = convert_func(root)
-
-            if batch_mode:
-                record = json.dumps({"subject_id": subject_id, "output": output})
-                batch_file.write(record + "\n")
-            else:
-                out_filename = os.path.join(
-                    args.path_to_output, f"{subject_id}.{file_extension}"
-                )
-                with open(
-                    out_filename, "w", encoding="utf-8", errors="xmlcharrefreplace"
-                ) as f:
-                    f.write(output)
-
             if args.test_mode and i > 20:
                 break
 
-        # Log summary statistics for missing provider_ids and care_site_ids
-        total_provider_ids = len(all_provider_ids_seen)
-        if total_provider_ids > 0:
-            missing_provider_pct = (
-                len(missing_provider_ids) / total_provider_ids
-            ) * 100
-            logger.info(
-                f"Process {process_id}: Missing provider_ids: {len(missing_provider_ids)}/{total_provider_ids} "
-                f"({missing_provider_pct:.2f}%)"
-            )
-            if missing_provider_ids:
-                logger.warning(
-                    f"Process {process_id}: Missing provider_ids (first 20): {list(missing_provider_ids)[:20]}"
-                )
-        else:
-            logger.info(f"Process {process_id}: No provider_ids encountered")
+        _log_provider_care_site_misses(
+            process_id,
+            all_provider_ids_seen,
+            missing_provider_ids,
+            all_care_site_ids_seen,
+            missing_care_site_ids,
+        )
+    finally:
+        if batch_file:
+            batch_file.close()
 
-        total_care_site_ids = len(all_care_site_ids_seen)
-        if total_care_site_ids > 0:
-            missing_care_site_pct = (
-                len(missing_care_site_ids) / total_care_site_ids
-            ) * 100
-            logger.info(
-                f"Process {process_id}: Missing care_site_ids: {len(missing_care_site_ids)}/{total_care_site_ids} "
-                f"({missing_care_site_pct:.2f}%)"
+
+def _log_provider_care_site_misses(
+    process_id: int,
+    all_provider_ids_seen: Set[str],
+    missing_provider_ids: Set[str],
+    all_care_site_ids_seen: Set[str],
+    missing_care_site_ids: Set[str],
+) -> None:
+    total_provider_ids = len(all_provider_ids_seen)
+    if total_provider_ids > 0:
+        missing_provider_pct = (len(missing_provider_ids) / total_provider_ids) * 100
+        logger.info(
+            f"Process {process_id}: Missing provider_ids: {len(missing_provider_ids)}/{total_provider_ids} "
+            f"({missing_provider_pct:.2f}%)"
+        )
+        if missing_provider_ids:
+            logger.warning(
+                f"Process {process_id}: Missing provider_ids (first 20): {list(missing_provider_ids)[:20]}"
             )
-            if missing_care_site_ids:
-                logger.warning(
-                    f"Process {process_id}: Missing care_site_ids (first 20): {list(missing_care_site_ids)[:20]}"
-                )
-        else:
-            logger.info(f"Process {process_id}: No care_site_ids encountered")
+    else:
+        logger.info(f"Process {process_id}: No provider_ids encountered")
+
+    total_care_site_ids = len(all_care_site_ids_seen)
+    if total_care_site_ids > 0:
+        missing_care_site_pct = (len(missing_care_site_ids) / total_care_site_ids) * 100
+        logger.info(
+            f"Process {process_id}: Missing care_site_ids: {len(missing_care_site_ids)}/{total_care_site_ids} "
+            f"({missing_care_site_pct:.2f}%)"
+        )
+        if missing_care_site_ids:
+            logger.warning(
+                f"Process {process_id}: Missing care_site_ids (first 20): {list(missing_care_site_ids)[:20]}"
+            )
+    else:
+        logger.info(f"Process {process_id}: No care_site_ids encountered")
+
+
+def process_parquet_shards_chunk(shard_paths: List[str], args, process_id: int):
+    """Worker: stream assigned Parquet shards and run the same per-subject pipeline."""
+    if not shard_paths:
+        logger.info(f"Process {process_id}: no Parquet shards assigned; skipping")
+        return
+
+    ontology = load_ontology(args.path_to_ontology)
+    metadata = load_metadata(args.path_to_metadata)
+    allowed = getattr(args, "parquet_allowed_subject_ids", None)
+
+    all_provider_ids_seen = set()
+    missing_provider_ids = set()
+    all_care_site_ids_seen = set()
+    missing_care_site_ids = set()
+
+    convert_func, file_extension = _conversion_setup(args)
+    batch_mode = getattr(args, "batch_mode", False)
+
+    if batch_mode:
+        batch_filename = os.path.join(args.path_to_output, f"batch_{process_id}.jsonl")
+        batch_file = open(batch_filename, "a", buffering=1, encoding="utf-8")
+    else:
+        batch_file = None
+
+    try:
+        stream = iter_subjects_from_parquet_files(
+            shard_paths,
+            allowed_subject_ids=set(allowed) if allowed is not None else None,
+        )
+        for subj_index, (subject_id, subject_ms) in enumerate(stream):
+            process_one_subject(
+                subject_id,
+                subject_ms,
+                args=args,
+                ontology=ontology,
+                metadata=metadata,
+                already_mutable=True,
+                convert_func=convert_func,
+                file_extension=file_extension,
+                batch_file=batch_file,
+                process_id=process_id,
+                all_provider_ids_seen=all_provider_ids_seen,
+                missing_provider_ids=missing_provider_ids,
+                all_care_site_ids_seen=all_care_site_ids_seen,
+                missing_care_site_ids=missing_care_site_ids,
+            )
+            if args.test_mode and subj_index > 20:
+                break
+
+        _log_provider_care_site_misses(
+            process_id,
+            all_provider_ids_seen,
+            missing_provider_ids,
+            all_care_site_ids_seen,
+            missing_care_site_ids,
+        )
     finally:
         if batch_file:
             batch_file.close()
@@ -1827,21 +2005,44 @@ def main(args):
     # HACK to fix os.fork() issue with polars (pre 3.14.0)
     multiprocessing.set_start_method("spawn", force=True)
 
-    # Ensure output directory exists.
     if not os.path.exists(args.path_to_output):
         os.makedirs(args.path_to_output)
 
-    # Load database once to obtain the list of subject IDs.
+    if args.meds_backend == "parquet":
+        shard_paths = discover_parquet_shards(args.path_to_meds)
+        if args.person_ids_file:
+            subject_ids_for_allow = load_and_validate_person_ids_parquet(
+                args.person_ids_file, shard_paths
+            )
+            args.parquet_allowed_subject_ids = frozenset(subject_ids_for_allow)
+        else:
+            args.parquet_allowed_subject_ids = None
+
+        partitions = partition_shards_across_workers(shard_paths, args.n_processes)
+
+        if args.n_processes > 1:
+            processes = []
+            for idx, chunk in enumerate(partitions):
+                p = multiprocessing.Process(
+                    target=process_parquet_shards_chunk,
+                    args=(chunk, args, idx),
+                )
+                p.start()
+                processes.append(p)
+            for p in processes:
+                p.join()
+        else:
+            process_parquet_shards_chunk(partitions[0], args, process_id=0)
+        return
+
     database = meds_reader.SubjectDatabase(args.path_to_meds)
 
-    # Determine which subject IDs to process
     if args.person_ids_file:
         subject_ids = load_and_validate_person_ids(args.person_ids_file, database)
     else:
         subject_ids = list(database)
 
     if args.n_processes > 1:
-        # Partition subject_ids into roughly equal chunks.
         n = len(subject_ids)
         chunk_size = (n // args.n_processes) + (n % args.n_processes > 0)
         chunks = [subject_ids[i : i + chunk_size] for i in range(0, n, chunk_size)]
@@ -1855,7 +2056,6 @@ def main(args):
         for p in processes:
             p.join()
     else:
-        # Single-process mode: process all subject IDs in one go.
         process_subjects_chunk(subject_ids, args, process_id=0)
 
 
@@ -1865,7 +2065,6 @@ if __name__ == "__main__":
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    logger = logging.getLogger(__name__)
     args = parse_args()
 
     start_time = time.time()

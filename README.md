@@ -1,5 +1,5 @@
 <h1 align="center">
-  <a href=""><img src="assets/logo.png" alt="pipelines" width="200"></a>
+  <a href=""><img src="assets/logo.png" alt="pipelines" width="150"></a>
   <br>
    MEDS-to-Text (<code>meds2text</code>)
   <br>
