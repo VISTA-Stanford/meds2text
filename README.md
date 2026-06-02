@@ -7,21 +7,7 @@
 
 <div align="center">
 
-  <a href="https://www.python.org/downloads/">
-    <img src="https://img.shields.io/badge/python-%3E%3D3.10-blue" alt="Python >= 3.10">
-  </a>
-  <a href="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml">
-    <img src="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests">
-  </a>
-  <a href="https://github.com/VISTA-Stanford/meds2text/graphs/commit-activity">
-    <img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained">
-  </a>
-  <a href="https://github.com/psf/black">
-    <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black">
-  </a>
-  <a href="https://github.com/VISTA-Stanford/meds2text/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
-  </a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-%3E%3D3.10-blue" alt="Python >= 3.10"></a> <a href="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml"><img src="https://github.com/VISTA-Stanford/meds2text/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests"></a> <a href="https://github.com/VISTA-Stanford/meds2text/graphs/commit-activity"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained"></a> <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a> <a href="https://github.com/VISTA-Stanford/meds2text/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 
 </div>
 
@@ -34,9 +20,6 @@ Render an **already-transformed** MEDS parquet extract into text representations
 > code moves, ICD10 → ICD10CM, delta encoding, flowsheet handling, etc.) now live
 > in [`medspace`](https://github.com/VISTA-Stanford/medspace); run e.g.
 > `medspace transform --preset STARR_CLEAN` before textifying.
-
-> [!WARNING]
-> This repo is not optimized for efficiency and was built for research expediency 🤪.
 
 > [!NOTE]
 > Flowsheet enrichment (flattening `STANFORD_OBS/Flowsheet` JSON into
