@@ -27,10 +27,8 @@ dependencies = [
   "python-dateutil>=2.8.0",
   "marisa-trie>=1.1.0",
   "numpy>=1.21.0",
-  "pytest>=7.0.0",
   "networkx>=3.0.0",
   "matplotlib>=3.5.0",
-  "meds-reader",
   "gradio>=4.0.0",
 ]
 description = "Transforms MEDS-formatted data to textual representations"
@@ -72,7 +70,7 @@ Homepage = "https://github.com/yourusername/meds-textify"
 Repository = "https://github.com/yourusername/meds-textify.git"
 
 [project.scripts]
-meds-textify = "meds2text.textify:main"
+meds-textify = "meds2text.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["meds2text*"]
@@ -129,8 +127,6 @@ module = [
   "lxml.*",
   "dateutil.*",
   "marisa_trie.*",
-  "meds_reader.*",
-  "starrforge.*",
 ]
 
 [tool.pytest.ini_options]

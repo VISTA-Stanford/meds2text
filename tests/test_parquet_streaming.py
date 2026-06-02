@@ -8,12 +8,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from meds2text.parquet_streaming import (
+from meds2text.io.parquet import (
     collect_subject_ids_from_shards,
     discover_parquet_shards,
     iter_subjects_from_parquet_files,
     partition_shards_across_workers,
-    rows_to_mutable_subject,
+    rows_to_subject,
 )
 
 
@@ -151,5 +151,5 @@ def test_rows_to_mutable_subject_sorts_by_time():
             "table": "observation",
         },
     ]
-    subj = rows_to_mutable_subject(1, rows)
+    subj = rows_to_subject(1, rows)
     assert [e.code for e in subj.events] == ["early", "late"]

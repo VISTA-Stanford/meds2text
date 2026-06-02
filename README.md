@@ -25,11 +25,24 @@
 
 </div>
 
-Transform MEDS-formatted data into text representations from OMOP CDM sources.
+Render an **already-transformed** MEDS parquet extract into text representations.
+
+> [!IMPORTANT]
+> `meds2text` does **not** transform/clean data. It assumes the input is a MEDS
+> parquet extract (`data/**/*.parquet`) that has already been cleaned upstream.
+> All OMOP/STARR transforms (orphan repair, visit-interval adjustment, billing
+> code moves, ICD10 → ICD10CM, delta encoding, flowsheet handling, etc.) now live
+> in [`medspace`](https://github.com/VISTA-Stanford/medspace); run e.g.
+> `medspace transform --preset STARR_CLEAN` before textifying.
 
 > [!WARNING]
-> Currently `meds2text` assumes the MEDS extract is sourced from OMOP CDM sources.
-> This repo is not optimized for effeciency and was built for research expediency 🤪.
+> This repo is not optimized for efficiency and was built for research expediency 🤪.
+
+> [!NOTE]
+> Flowsheet enrichment (flattening `STANFORD_OBS/Flowsheet` JSON into
+> `name` / `unit_source_value` / `group_name`) is intentionally **not** handled
+> here. `medspace.transforms.parse_flowsheet_json` currently only extracts the
+> measurement value; if richer flowsheet rendering is needed, extend it there.
 
 ### Projects Using `meds2text`
 
@@ -63,15 +76,14 @@ Convert INSPECT (or any MEDS dataset) to LUMIA XML markup. This should take ~10 
 ### Default: Export All Structured Data + Notes
 
 ```bash
-python src/meds2text/textify.py \
---path_to_meds data/meds_extracts/meds_reader_omop_inspect/ \
+meds-textify \
+--path_to_meds data/meds_extracts/omop_inspect/ \
 --path_to_ontology data/athena_omop_ontologies/ \
 --path_to_metadata data/omop_metadata/ \
 --path_to_output data/inspect_lumia_xml/ \
 --exclude_props clarity_table \
 --format lumia_xml \
 --include_contexts person providers care_sites \
---apply_transforms \
 --event_types "*" \
 --n_processes 8 
 ```
@@ -93,15 +105,14 @@ To miminize markup bloat, you can filter out events using `--exclude_props`.
 Generate markup for **notes + visits** and exclude providers + care_sites
 
 ```bash
-python src/meds2text/textify.py \
---path_to_meds data/meds_extracts/meds_reader_omop_inspect/ \
+meds-textify \
+--path_to_meds data/meds_extracts/omop_inspect/ \
 --path_to_ontology data/athena_omop_ontologies/ \
 --path_to_metadata data/omop_metadata/ \
 --path_to_output data/inspect_lumia_xml/ \
 --exclude_props clarity_table visit_id provider_id \
 --format lumia_xml \
 --include_contexts person \
---apply_transforms \
 --event_types note visit_detail visit \
 --n_processes 8
 ```
@@ -110,15 +121,14 @@ Generate markup for **only structured data** and exclude providers + care_sites
 
 
 ```bash
-python src/meds2text/textify.py \
---path_to_meds data/meds_extracts/meds_reader_omop_inspect/ \
+meds-textify \
+--path_to_meds data/meds_extracts/omop_inspect/ \
 --path_to_ontology data/athena_omop_ontologies/ \
 --path_to_metadata data/omop_metadata/ \
 --path_to_output data/inspect_lumia_xml/ \
 --exclude_props clarity_table visit_id provider_id \
 --format lumia_xml \
 --include_contexts person \
---apply_transforms \
 --event_types condition death device_exposure drug_exposure image measurement observation procedure visit visit_detail \
 --n_processes 8
 ```

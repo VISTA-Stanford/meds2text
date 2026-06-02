@@ -1,0 +1,61 @@
+<?xml version='1.0' encoding='utf-8'?>
+<eventstream person_id="100">
+  <encounter>
+    <person>
+      <birthdate>1980-05-15</birthdate>
+      <age>
+        <days>14475</days>
+        <years>39</years>
+      </age>
+      <demographics>
+        <ethnicity code="Ethnicity/38003564">Not Hispanic or Latino</ethnicity>
+        <gender code="Gender/8507">MALE</gender>
+        <race code="Race/8527">White</race>
+      </demographics>
+      <payerplan>Medicare</payerplan>
+    </person>
+    <caresites>
+      <caresite care_site_id="10" care_site_name="Main Hospital"/>
+    </caresites>
+    <providers>
+      <provider provider_id="1" gender="MALE" speciality="Cardiology" year_of_birth="1975" care_site_id="10" care_site_name="Main Hospital"/>
+    </providers>
+    <events>
+      <entry timestamp="2020-01-01 08:00">
+        <event table="visit" code="Visit/IP" name="Inpatient Visit" visit_id="500" provider_id="1" care_site_id="10"/>
+      </entry>
+      <entry timestamp="2020-01-01 09:30">
+        <event table="measurement" code="LOINC/8867-4" name="Heart rate" visit_id="500" provider_id="1" care_site_id="10">72</event>
+      </entry>
+      <entry timestamp="2020-01-01 10:00">
+        <event table="note" code="Note/11506-3" name="Progress note" visit_id="500" provider_id="1" care_site_id="_">Patient stable.</event>
+      </entry>
+      <entry timestamp="2020-01-02 09:00">
+        <event table="condition" code="ICD10CM/I10" name="Essential hypertension" visit_id="500" provider_id="_" care_site_id="_"/>
+      </entry>
+    </events>
+  </encounter>
+  <encounter>
+    <person>
+      <age>
+        <days>14992</days>
+        <years>41</years>
+      </age>
+      <payerplan>Medicare</payerplan>
+    </person>
+    <caresites>
+      <caresite care_site_id="20" care_site_name="Outpatient Clinic"/>
+    </caresites>
+    <providers>
+      <provider provider_id="2" gender="FEMALE" speciality="Endocrinology" year_of_birth="1980" care_site_id="20" care_site_name="Outpatient Clinic"/>
+    </providers>
+    <events>
+      <entry timestamp="2021-06-01 12:00">
+        <event table="measurement" code="LOINC/2345-7" name="Glucose" visit_id="600" provider_id="2" care_site_id="20">105</event>
+      </entry>
+      <entry timestamp="2021-06-01 13:00">
+        <event table="condition" code="ICD10CM/E11" name="Type 2 diabetes mellitus" visit_id="600" provider_id="2" care_site_id="20"/>
+      </entry>
+    </events>
+  </encounter>
+</eventstream>
