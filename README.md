@@ -44,13 +44,13 @@ pip install -e .[dev]
 
 ## 📦 Data Dependencies
 
-- **Athena Vocabularies**: Required for OMOP concept mapping. See section "Athena Vocabularies" for guidance on where to download or build from scratch.
+- **Athena Vocabularies**: Required for OMOP concept mapping. See section "I. Athena Vocabularies" for guidance on where to download or build from scratch.
 - **Metadata (OPTIONAL)**: Events can be linked to `care_site_id`, `provider_id`, and `payer_plan` via external dataframes if not present in the MEDS extract.
 - **MEDS Extract**: Can be generated using internal STARR OMOP CDM data or via existing public extracts.
   - [MedAlign](https://stanford.redivis.com/datasets/48nr-frxd97exb)
   - [INSPECT](https://stanford.redivis.com/datasets/dzc6-9jyt6gapt)
   - [EHRSHOT](https://stanford.redivis.com/datasets/53gc-8rhx41kgt)
-  - MIMIC-IV (see here and here) 	
+  - [MIMIC-IV](https://physionet.org/content/mimiciv/)
 
 ## ⚡ Quick Start: Textifying a MEDS Extract
 
@@ -73,9 +73,13 @@ meds-textify \
 
 ### Options: Format
 
-- LUMIA XML \[default\]  (see [specification](docs/markup.md))  
-- JSONL 
-- FHIR-like [sketch-only]
+Set with `--format`:
+
+- `lumia_xml` \[default\] (see [specification](docs/markup.md))
+- `lumia_json`
+- `fhir_like_json` (sketch only)
+
+By default one file is written per subject. Pass `--batch_mode` (with `--batch_size`) to instead write batched JSONL files (`batch_<n>.jsonl`), one record per subject.
 
 ### Options: Filter Properties
 
@@ -116,39 +120,34 @@ meds-textify \
 --n_processes 8
 ```
 
-## 📊 Timeline Viewer
+You can also drop events by code pattern (wildcards supported) with `--exclude_codes`, e.g. `--exclude_codes "STANFORD_OBS/*"`.
 
-After generating LUMIA XML files, you can use the interactive timeline viewer to visualize patient timelines in a web interface.
+### Options: Person Context
 
-![Timeline Viewer Screenshot](assets/timeline-viewer.png)
+When `--include_contexts person` is set, a `<person>` block is attached to each encounter. You control which sub-blocks appear, and where, with two flags:
 
-### Features
+- `--person_fields_every_encounter` (default: `age payerplan`) — fields that change over time and are repeated in every encounter.
+- `--person_fields_first_encounter` (default: `birthdate demographics`) — static fields emitted only in the first encounter.
 
-- **Interactive Timeline Visualization**: Browse patient encounters chronologically with collapsible sections
-- **Event Filtering**: Show/hide specific event types (visits, medications, procedures, notes, etc.)
-- **Search & Highlight**: Search across event names and values with regex support
-- **Heatmap View**: Color-code encounters based on event density
-- **Customizable Display**: Toggle note truncation, expand all sections, and invert timeline order
-
-### Usage
-
-Launch the timeline viewer with a directory containing XML files:
+Valid fields are `birthdate`, `age`, `demographics`, and `payerplan`. A field listed in neither flag is omitted entirely. For example, to repeat the birthdate in every encounter and drop demographics:
 
 ```bash
-python apps/timeline_viewer/app.py \
---timeline_dir data/inspect_lumia_xml/ \
---person_id 125614144
+meds-textify \
+--path_to_meds data/meds_extracts/omop_inspect/ \
+--path_to_ontology data/athena_omop_ontologies/ \
+--path_to_metadata data/omop_metadata/ \
+--path_to_output data/inspect_lumia_xml/ \
+--include_contexts person \
+--person_fields_every_encounter age payerplan birthdate \
+--person_fields_first_encounter
 ```
 
-**Parameters:**
-- `--timeline_dir`: Directory containing LUMIA XML timeline files
-- `--person_id`: Unique substring of XML filename to load on startup (optional)
+### Options: Other
 
-The viewer will launch a web interface where you can:
-1. Select different patients by entering a person ID
-2. Filter event types using checkboxes
-3. Search for specific terms or patterns
-4. Customize the display options
+- `--person_ids_file`: CSV/TSV with a `person_id` column to restrict processing to a subset of subjects.
+- `--attribute_order`: preferred ordering of XML attributes (default: `table code name`).
+- `--batch_mode` / `--batch_size`: write batched JSONL instead of one file per subject.
+- `--test_mode`: process only a handful of subjects for quick smoke tests.
 
 ## 🛠️ Detailed Reproduction Steps
 
@@ -174,7 +173,7 @@ You can do either (1) download a [cached snapshot here](https://drive.google.com
 
 **2. Download and Update with the CPT4 Vocabulary** 
 
-- Generate an API KEY for your [UMLS account profile](https://uts.nlm.nih.gov/uts.html#profile) and use `cpt.sh` to download the CPT4 vocabulary and auto-update Athena vocabularies `./cpt.sh $NLM_API_KEY`
+- CPT4 cannot be redistributed and must be added manually. Generate an API key from your [UMLS account profile](https://uts.nlm.nih.gov/uts.html#profile) and follow the Athena instructions (the bundled `cpt.sh` script in your Athena download) to reconstitute CPT4 into the vocabulary files.
 - Place the updated vocabulary folder in your `data/` directory (e.g., `data/athena_ontologies_snapshot/`).
 
 **3. Create Dataframes and Prefix Trie** 
