@@ -153,3 +153,42 @@ def test_rows_to_mutable_subject_sorts_by_time():
     ]
     subj = rows_to_subject(1, rows)
     assert [e.code for e in subj.events] == ["early", "late"]
+
+
+def test_visit_id_aliased_from_visit_occurrence_id():
+    """OMOP-standard extracts carry visit_occurrence_id; alias it to visit_id."""
+    rows = [
+        {
+            "subject_id": 1,
+            "time": datetime(2020, 1, 1),
+            "code": "A",
+            "table": "measurement",
+            "visit_occurrence_id": 99,
+        },
+        {
+            "subject_id": 1,
+            "time": datetime(2020, 1, 2),
+            "code": "B",
+            "table": "measurement",
+            "visit_occurrence_id": None,
+        },
+    ]
+    subj = rows_to_subject(1, rows)
+    assert subj.events[0].visit_id == 99
+    assert subj.events[1].visit_id is None
+
+
+def test_existing_visit_id_wins_over_fallback():
+    """A non-null visit_id is never overwritten by visit_occurrence_id."""
+    rows = [
+        {
+            "subject_id": 1,
+            "time": datetime(2020, 1, 1),
+            "code": "A",
+            "table": "measurement",
+            "visit_id": 7,
+            "visit_occurrence_id": 99,
+        },
+    ]
+    subj = rows_to_subject(1, rows)
+    assert subj.events[0].visit_id == 7

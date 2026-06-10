@@ -56,6 +56,31 @@ def collect_subject_ids_from_shards(shards: Sequence[str]) -> Set[int]:
     return ids
 
 
+# MEDS column carrying the visit/encounter key. Encounter binning and the
+# rendered ``visit_id`` attribute both read ``visit_id``, but OMOP-standard MEDS
+# extracts name this column ``visit_occurrence_id``. Treat the latter as a
+# fallback source so meds2text works on either schema without pre-mutating the
+# extract.
+_VISIT_ID_CANONICAL = "visit_id"
+_VISIT_ID_FALLBACKS = ("visit_occurrence_id",)
+
+
+def _canonicalize_visit_id(properties: Dict[str, Any]) -> None:
+    """Populate ``visit_id`` from a fallback column when it is absent/null.
+
+    Mutates ``properties`` in place. Existing non-null ``visit_id`` values win;
+    the fallback only fills gaps, so it is safe on extracts that already carry a
+    ``visit_id`` column.
+    """
+    if properties.get(_VISIT_ID_CANONICAL) is not None:
+        return
+    for source in _VISIT_ID_FALLBACKS:
+        value = properties.get(source)
+        if value is not None:
+            properties[_VISIT_ID_CANONICAL] = value
+            return
+
+
 def rows_to_subject(subject_id: int, rows: List[Dict[str, Any]]) -> Subject:
     """Build a :class:`Subject` from MEDS row dicts, sorted by event time."""
     sorted_rows = sorted(
@@ -68,6 +93,7 @@ def rows_to_subject(subject_id: int, rows: List[Dict[str, Any]]) -> Subject:
         if code is None:
             raise ValueError(f"Null code for subject_id={subject_id}")
         properties = {k: v for k, v in row.items() if k not in ("time", "code")}
+        _canonicalize_visit_id(properties)
         events.append(Event(row["time"], str(code), properties))
     return Subject(subject_id=subject_id, events=events)
 

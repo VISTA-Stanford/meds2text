@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 
 from meds2text import pipeline
 from meds2text.config import (
+    VALID_COLLAPSE_RESOLUTIONS,
     VALID_CONTEXTS,
     VALID_FORMATS,
     VALID_PERSON_FIELDS,
@@ -96,6 +97,37 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> TextifyConfig:
         default=None,
         help="Preferred XML attribute order (default: table, code, name)",
     )
+    parser.add_argument(
+        "--emit_code_legend",
+        action="store_true",
+        help="Emit a per-document <legend> of code->name and drop the repeated "
+        "per-event name attribute (lossless; intended for lumia_xml)",
+    )
+    parser.add_argument(
+        "--drop_table",
+        action="store_true",
+        help="Drop the per-event table attribute from the rendered output",
+    )
+    parser.add_argument(
+        "--collapse_events",
+        default=None,
+        choices=list(VALID_COLLAPSE_RESOLUTIONS),
+        help="Collapse events within each encounter to 'day' or 'visit' "
+        "resolution: numeric measurements -> min/max/mean/count, repeated "
+        "non-numeric events de-duplicated, notes kept in full (lossy)",
+    )
+    parser.add_argument(
+        "--minify_tags",
+        action="store_true",
+        help="Shorten high-frequency tag/attr names (event->e, entry->g, "
+        "timestamp->t) to further shrink lumia_xml output",
+    )
+    parser.add_argument(
+        "--compress_notes",
+        action="store_true",
+        help="Compress note text_value before render: de-id scrub, whitespace "
+        "collapse, and PMC 10-gram cross-note dedup (lumia_xml only)",
+    )
     parser.add_argument("--batch_mode", action="store_true", help="Write batched JSONL")
     parser.add_argument("--batch_size", type=int, default=2500)
     parser.add_argument(
@@ -122,6 +154,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> TextifyConfig:
         exclude_codes=tuple(args.exclude_codes),
         event_types=tuple(args.event_types),
         attribute_order=tuple(args.attribute_order) if args.attribute_order else None,
+        emit_code_legend=args.emit_code_legend,
+        drop_table_attr=args.drop_table,
+        collapse_events=args.collapse_events,
+        minify_tags=args.minify_tags,
+        compress_notes=args.compress_notes,
         batch_mode=args.batch_mode,
         batch_size=args.batch_size,
         test_mode=args.test_mode,

@@ -12,6 +12,7 @@ from typing import FrozenSet, Optional, Tuple
 
 VALID_FORMATS = ("lumia_xml", "lumia_json", "fhir_like_json")
 VALID_CONTEXTS = ("person", "providers", "care_sites")
+VALID_COLLAPSE_RESOLUTIONS = ("day", "visit")
 # Sub-blocks of the per-encounter <person> element.
 VALID_PERSON_FIELDS = ("birthdate", "age", "demographics", "payerplan")
 
@@ -38,6 +39,25 @@ class TextifyConfig:
     exclude_codes: Tuple[str, ...] = ()
     event_types: Tuple[str, ...] = ("*",)
     attribute_order: Optional[Tuple[str, ...]] = None
+    # Emit a per-document <legend> mapping each used code -> ontology name and
+    # drop the (otherwise repeated) per-event ``name`` attribute. Lossless: full
+    # names live in the legend. Intended for ``lumia_xml``.
+    emit_code_legend: bool = False
+    # Drop the per-event ``table`` attribute from the rendered output. The table
+    # is still used internally for event filtering and image-name resolution.
+    drop_table_attr: bool = False
+    # Collapse events within each encounter to a coarser temporal resolution:
+    # ``"day"`` (group by calendar day) or ``"visit"`` (group by visit_id, falling
+    # back to day). Numeric measurements are summarized as min/max/mean/count;
+    # repeated non-numeric events are de-duplicated; notes are kept in full. Lossy.
+    collapse_events: Optional[str] = None
+    # Minify the high-frequency XML tag/attribute names (event->e, entry->g,
+    # timestamp->t) to shrink the output. Intended for lumia_xml.
+    minify_tags: bool = False
+    # Compress clinical-note ``text_value`` before render: de-id scrub, whitespace
+    # collapse (lossless for tokens), and PMC 10-gram cross-note dedup (removes
+    # redundant copy-paste). Intended for lumia_xml.
+    compress_notes: bool = False
     batch_mode: bool = False
     batch_size: int = 2500
     test_mode: bool = False
@@ -50,6 +70,26 @@ class TextifyConfig:
         if self.output_format not in VALID_FORMATS:
             raise ValueError(
                 f"Invalid format {self.output_format!r}; choose from {VALID_FORMATS}"
+            )
+        if (
+            self.emit_code_legend
+            or self.drop_table_attr
+            or self.collapse_events
+            or self.minify_tags
+            or self.compress_notes
+        ) and (self.output_format != "lumia_xml"):
+            raise ValueError(
+                "--emit_code_legend / --drop_table / --collapse_events / "
+                "--minify_tags / --compress_notes are only supported with "
+                "--format lumia_xml (the FHIR-like renderer relies on the "
+                "per-event table and name attributes and the canonical tag names)"
+            )
+        if self.collapse_events and self.collapse_events not in (
+            VALID_COLLAPSE_RESOLUTIONS
+        ):
+            raise ValueError(
+                f"Invalid collapse_events {self.collapse_events!r}; "
+                f"choose from {VALID_COLLAPSE_RESOLUTIONS}"
             )
         for context in self.include_contexts:
             if context not in VALID_CONTEXTS:

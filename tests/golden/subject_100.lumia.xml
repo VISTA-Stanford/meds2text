@@ -15,10 +15,10 @@
       <payerplan>Medicare</payerplan>
     </person>
     <caresites>
-      <caresite care_site_id="10" care_site_name="Main Hospital"/>
+      <caresite name="Main Hospital"/>
     </caresites>
     <providers>
-      <provider provider_id="1" gender="MALE" speciality="Cardiology" year_of_birth="1975" care_site_id="10" care_site_name="Main Hospital"/>
+      <provider speciality="Cardiology"/>
     </providers>
     <events>
       <entry timestamp="2020-01-01 08:00">
@@ -44,10 +44,10 @@
       <payerplan>Medicare</payerplan>
     </person>
     <caresites>
-      <caresite care_site_id="20" care_site_name="Outpatient Clinic"/>
+      <caresite name="Outpatient Clinic"/>
     </caresites>
     <providers>
-      <provider provider_id="2" gender="FEMALE" speciality="Endocrinology" year_of_birth="1980" care_site_id="20" care_site_name="Outpatient Clinic"/>
+      <provider speciality="Endocrinology"/>
     </providers>
     <events>
       <entry timestamp="2021-06-01 12:00">

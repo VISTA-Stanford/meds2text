@@ -16,11 +16,19 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from lxml.etree import tostring
 
 from meds2text import pipeline
 from meds2text.config import TextifyConfig
 from meds2text.encounters import FuzzyVisitStrategy, bin_encounters, fuzzy_partition
-from meds2text.subject import Event
+from meds2text.metadata import MissTracker
+from meds2text.render.xml import (
+    SMOKING_HISTORY_PSEUDO_CODE,
+    build_subject_xml,
+    care_sites_to_xml,
+    collapse_smoking_events,
+)
+from meds2text.subject import Event, Subject
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -251,6 +259,386 @@ def test_textify_event_type_filter(textify_env):
     assert 'table="note"' in content
     assert 'table="measurement"' not in content
     assert 'table="condition"' not in content
+
+
+class _DictOntology:
+    """Minimal ontology stub exposing only ``get_description``."""
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def get_description(self, code):
+        return self._mapping.get(code)
+
+
+def test_textify_emit_code_legend_and_drop_table(textify_env):
+    config = TextifyConfig(
+        path_to_meds=textify_env["meds"],
+        path_to_output=textify_env["output"],
+        path_to_ontology=textify_env["ontology"],
+        output_format="lumia_xml",
+        emit_code_legend=True,
+        drop_table_attr=True,
+    )
+    pipeline.run(config)
+    content = Path(os.path.join(textify_env["output"], f"{_SUBJECT_ID}.xml")).read_text(
+        encoding="utf-8"
+    )
+
+    # A document-level legend carries code -> name, one entry per distinct code.
+    assert "<legend>" in content
+    assert '<code id="LOINC/8867-4" name="Heart rate"/>' in content
+    assert '<code id="ICD10CM/I10" name="Essential hypertension"/>' in content
+    assert content.count('id="LOINC/8867-4"') == 1
+    # The name now lives ONLY in the legend, not repeated on each event.
+    assert content.count('name="Heart rate"') == 1
+    assert content.count('name="Essential hypertension"') == 1
+    assert "<event " in content and 'name="' not in content.split("</legend>")[1]
+    # table attribute dropped from every event.
+    assert 'table="measurement"' not in content
+    assert 'table="condition"' not in content
+    # code and value are still emitted on the event itself (lossless).
+    assert 'code="LOINC/8867-4"' in content
+    assert ">72</event>" in content
+
+
+def test_emit_code_legend_keeps_image_event_name_inline():
+    """Image-event names are per-event (not code-derived), so they stay inline."""
+    ontology = _DictOntology({"LOINC/8867-4": "Heart rate"})
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 72.0},
+        ),
+        Event(
+            _DT(2020, 1, 1, 10, 0),
+            "IMG/1",
+            {
+                "table": "image",
+                "anatomic_site_source_value": "CHEST",
+                "modality_source_value": "XR",
+            },
+        ),
+    ]
+    subject = Subject(subject_id=1, events=events)
+    encounters = bin_encounters(events, excluded_tables={"person"})
+    config = TextifyConfig(
+        path_to_meds="x",
+        path_to_output="y",
+        path_to_ontology="z",
+        output_format="lumia_xml",
+        emit_code_legend=True,
+        drop_table_attr=True,
+    )
+    root = build_subject_xml(
+        subject,
+        encounters,
+        ontology=ontology,
+        metadata=None,
+        config=config,
+        miss=MissTracker(),
+    )
+    xml = tostring(root, pretty_print=True).decode("utf-8")
+
+    # Image event retains its inline derived name; measurement name is legend-only.
+    assert 'name="CHEST XR"' in xml
+    assert '<code id="LOINC/8867-4" name="Heart rate"/>' in xml
+    # Image code is NOT in the legend (its name is not a function of the code).
+    assert 'id="IMG/1"' not in xml
+    # table dropped everywhere.
+    assert "table=" not in xml
+
+
+def test_compact_flags_require_lumia_xml():
+    with pytest.raises(ValueError, match="lumia_xml"):
+        TextifyConfig(
+            path_to_meds="x",
+            path_to_output="y",
+            output_format="fhir_like_json",
+            emit_code_legend=True,
+        )
+    with pytest.raises(ValueError, match="lumia_xml"):
+        TextifyConfig(
+            path_to_meds="x",
+            path_to_output="y",
+            output_format="fhir_like_json",
+            compress_notes=True,
+        )
+
+
+def _render_events(events, ontology, **config_kwargs):
+    subject = Subject(subject_id=1, events=events)
+    encounters = bin_encounters(events, excluded_tables={"person"})
+    config = TextifyConfig(
+        path_to_meds="x",
+        path_to_output="y",
+        path_to_ontology="z",
+        output_format="lumia_xml",
+        **config_kwargs,
+    )
+    root = build_subject_xml(
+        subject,
+        encounters,
+        ontology=ontology,
+        metadata=None,
+        config=config,
+        miss=MissTracker(),
+    )
+    return tostring(root, pretty_print=True).decode("utf-8")
+
+
+def test_event_to_xml_omits_null_sentinel_attributes():
+    from meds2text.render.xml import event_to_xml
+
+    ontology = _DictOntology({"LOINC/11277-1": "Epithelial cells"})
+    event = Event(
+        _DT(2020, 1, 1),
+        "LOINC/11277-1",
+        {
+            "table": "measurement",
+            "text_value": "Rare",
+            "clarity_table": "shc_order_results",
+            "measurement_id": "3141499654",
+            "care_site_name": "_",
+            "visit_occurrence_id": "_",
+        },
+    )
+    elem = event_to_xml(
+        event,
+        ontology,
+        excluded_props={
+            "clarity_table",
+            "measurement_id",
+            "care_site_name",
+            "visit_occurrence_id",
+            "visit_id",
+        },
+    )
+    xml = tostring(elem, pretty_print=True).decode("utf-8")
+    assert "clarity_table=" not in xml
+    assert "measurement_id=" not in xml
+    assert "care_site_name=" not in xml
+    assert "visit_occurrence_id=" not in xml
+    assert ">Rare</event>" in xml
+
+
+def test_compress_notes_scrubs_and_dedups_in_render():
+    ontology = _DictOntology({"Note/1": "Progress note", "Note/2": "Discharge note"})
+    phrase = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "Note/1",
+            {"table": "note", "text_value": f"  MRN: [0000]  {phrase}  "},
+        ),
+        Event(
+            _DT(2020, 1, 2, 9, 0),
+            "Note/2",
+            {"table": "note", "text_value": f"{phrase} unique tail words here"},
+        ),
+    ]
+    xml = _render_events(events, ontology, compress_notes=True)
+
+    assert "MRN" not in xml
+    assert phrase in xml
+    assert "unique tail words here" in xml
+    # Repeated 10-gram from note 1 should not appear again in note 2 body.
+    assert xml.count(phrase) == 1
+
+
+def test_collapse_day_summarizes_measurements_and_dedups():
+    ontology = _DictOntology(
+        {
+            "LOINC/8867-4": "Heart rate",
+            "ICD10CM/I10": "Essential hypertension",
+            "Note/1": "Progress note",
+        }
+    )
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 70.0},
+        ),
+        Event(
+            _DT(2020, 1, 1, 12, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 90.0},
+        ),
+        Event(
+            _DT(2020, 1, 1, 15, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 80.0},
+        ),
+        Event(_DT(2020, 1, 1, 9, 0), "ICD10CM/I10", {"table": "condition"}),
+        Event(_DT(2020, 1, 1, 10, 0), "ICD10CM/I10", {"table": "condition"}),
+        Event(
+            _DT(2020, 1, 1, 11, 0),
+            "Note/1",
+            {
+                "table": "note",
+                "text_value": "Patient stable and recovering well today.",
+            },
+        ),
+        Event(
+            _DT(2020, 1, 2, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 72.0},
+        ),
+    ]
+    xml = _render_events(events, ontology, collapse_events="day")
+
+    # Day 1 heart rate: 3 readings -> a single min/max/mean/count summary.
+    assert (
+        'n="3"' in xml
+        and 'min="70"' in xml
+        and 'max="90"' in xml
+        and 'mean="80.00"' in xml
+    )
+    # Repeated condition collapses to one event carrying a repeat count.
+    assert xml.count('code="ICD10CM/I10"') == 1
+    assert 'n="2"' in xml
+    # Note text is preserved verbatim.
+    assert "Patient stable and recovering well today." in xml
+    # Day 2 has a single reading -> rendered verbatim (no summary stats).
+    assert ">72</event>" in xml
+    # Two day buckets -> two entries.
+    assert xml.count("<entry ") == 2
+    assert 'timestamp="2020-01-01"' in xml and 'timestamp="2020-01-02"' in xml
+
+
+def test_collapse_visit_groups_by_visit_id_with_day_fallback():
+    ontology = _DictOntology({"LOINC/8867-4": "Heart rate"})
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 70.0, "visit_id": 500},
+        ),
+        Event(
+            _DT(2020, 1, 2, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 90.0, "visit_id": 500},
+        ),
+        Event(
+            _DT(2020, 1, 3, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 80.0},
+        ),
+    ]
+    xml = _render_events(events, ontology, collapse_events="visit")
+
+    # Visit 500 spans two days -> a start..end span label, summarized to n=2.
+    assert 'timestamp="2020-01-01..2020-01-02"' in xml
+    assert 'n="2"' in xml
+    # The visit-less event falls back to a day bucket.
+    assert 'timestamp="2020-01-03"' in xml
+
+
+def test_minify_tags_renames_high_frequency_tags():
+    ontology = _DictOntology({"LOINC/8867-4": "Heart rate"})
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 70.0},
+        ),
+    ]
+    xml = _render_events(events, ontology, minify_tags=True)
+
+    assert "<enc>" in xml  # encounter -> enc
+    assert "<es>" in xml  # events -> es
+    assert "<g " in xml  # entry -> g
+    assert "<e " in xml  # event -> e
+    assert 'timestamp="' not in xml and 't="2020-01-01 09:00"' in xml
+    # No canonical event/entry tags remain (eventstream root is left intact).
+    assert "<event " not in xml and "<entry " not in xml
+
+
+def test_care_sites_filter_donotuse_and_drop_ids():
+    xml = care_sites_to_xml(
+        ["GI ONCOLOGY | ONCOLOGY", "DONOTUSE | ", "DONOTUSE", "Main Hospital"]
+    )
+    text = tostring(xml, pretty_print=True).decode("utf-8")
+    assert 'name="GI ONCOLOGY | ONCOLOGY"' in text
+    assert 'name="Main Hospital"' in text
+    assert "DONOTUSE" not in text
+    assert "care_site_id" not in text
+
+
+def test_collapse_smoking_events_merges_panel():
+    events = [
+        Event(
+            _DT(2020, 1, 1),
+            "LOINC/72166-2",
+            {"table": "observation", "text_value": "Never"},
+        ),
+        Event(
+            _DT(2020, 1, 1),
+            "SNOMED/228490006",
+            {"table": "observation", "text_value": "N"},
+        ),
+        Event(
+            _DT(2020, 1, 1),
+            "SNOMED/228510007",
+            {"table": "observation", "text_value": "N"},
+        ),
+        Event(
+            _DT(2020, 1, 1),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 72.0},
+        ),
+    ]
+    legend: dict = {}
+    out = collapse_smoking_events(events, legend=legend)
+    assert len(out) == 2
+    assert out[0].code == "LOINC/8867-4"
+    assert out[1].code == SMOKING_HISTORY_PSEUDO_CODE
+    assert "smoking=Never" in out[1].text_value
+    assert "snuff=N" in out[1].text_value
+    assert SMOKING_HISTORY_PSEUDO_CODE in legend
+
+
+def test_collapse_day_includes_legend_units():
+    ontology = _DictOntology({"LOINC/8867-4": "Heart rate"})
+    events = [
+        Event(
+            _DT(2020, 1, 1, 9, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 70.0, "unit_source_value": "bpm"},
+        ),
+        Event(
+            _DT(2020, 1, 1, 12, 0),
+            "LOINC/8867-4",
+            {"table": "measurement", "numeric_value": 90.0, "unit_source_value": "bpm"},
+        ),
+    ]
+    xml = _render_events(
+        events,
+        ontology,
+        collapse_events="day",
+        emit_code_legend=True,
+    )
+    assert 'unit="bpm"' in xml
+    assert 'id="LOINC/8867-4"' in xml and 'name="Heart rate"' in xml
+
+
+def test_collapse_requires_lumia_and_valid_resolution():
+    with pytest.raises(ValueError, match="lumia_xml"):
+        TextifyConfig(
+            path_to_meds="x",
+            path_to_output="y",
+            output_format="lumia_json",
+            collapse_events="day",
+        )
+    with pytest.raises(ValueError, match="collapse_events"):
+        TextifyConfig(
+            path_to_meds="x",
+            path_to_output="y",
+            output_format="lumia_xml",
+            collapse_events="hour",
+        )
 
 
 def test_textify_json_format(textify_env):

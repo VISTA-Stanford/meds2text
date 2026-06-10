@@ -193,7 +193,12 @@ def get_payer_plan_coverage(
 def calculate_age(start_date: datetime, end_date: datetime) -> Dict[str, int]:
     """Return age in whole years and total days between two datetimes."""
     if start_date > end_date:
-        raise ValueError("Start date must be before end date")
+        logger.debug(
+            "Encounter time %s precedes birth %s; reporting age 0",
+            end_date,
+            start_date,
+        )
+        return {"age_in_years": 0, "age_in_days": 0}
     return {
         "age_in_years": relativedelta(end_date, start_date).years,
         "age_in_days": (end_date - start_date).days,
