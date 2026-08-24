@@ -1316,6 +1316,7 @@ def event_to_xml(
         attribute_order = ["table", "code", "name"]
 
     # code description / name
+    name = ""
     if event.code != "STANFORD_OBS/Flowsheet":
         name = ontology.get_description(event.code) or ""
 
